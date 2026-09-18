@@ -221,6 +221,7 @@ func (n *Node) Start(ctx context.Context) error {
 		n.stop()
 		return serr
 	}
+	n.identity.Version = identityVersion
 	n.wg.Add(2)
 	go func() {
 		defer n.wg.Done()
