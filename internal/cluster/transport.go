@@ -24,12 +24,15 @@ const (
 // Message kinds on the internal transport. This framing is intentionally
 // separate from the public client SQL protocol.
 const (
-	KindPing     = "ping"
-	KindJoin     = "join"
-	KindLeave    = "leave"
-	KindMetadata = "metadata"
-	KindLookup   = "lookup"
-	KindForward  = "forward"
+	KindPing       = "ping"
+	KindJoin       = "join"
+	KindLeave      = "leave"
+	KindMetadata   = "metadata"
+	KindLookup     = "lookup"
+	KindForward    = "forward"
+	KindRangeOp    = "range_op"
+	KindMoveLeader = "move_leader"
+	KindRemove     = "remove"
 )
 
 type envelope struct {
@@ -294,6 +297,13 @@ func isTimeout(err error) bool {
 }
 
 func readEnvelope(r *bufio.Reader) (envelope, error) {
+	magic, err := r.ReadByte()
+	if err != nil {
+		return envelope{}, err
+	}
+	if magic != riverMagic {
+		return envelope{}, errors.New("not a cluster frame")
+	}
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return envelope{}, err
@@ -314,6 +324,13 @@ func readEnvelope(r *bufio.Reader) (envelope, error) {
 }
 
 func readResponse(r *bufio.Reader) (response, error) {
+	magic, err := r.ReadByte()
+	if err != nil {
+		return response{}, err
+	}
+	if magic != riverMagic {
+		return response{}, errors.New("not a cluster frame")
+	}
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return response{}, err
@@ -333,9 +350,16 @@ func readResponse(r *bufio.Reader) (response, error) {
 	return out, nil
 }
 
+// riverMagic prefixes every internal frame so the port mux can separate
+// cluster RPC from Raft traffic. Public client SQL framing is unchanged.
+const riverMagic = byte('S')
+
 func writeFrame(w *bufio.Writer, v any) error {
 	payload, err := json.Marshal(v)
 	if err != nil {
+		return err
+	}
+	if err := w.WriteByte(riverMagic); err != nil {
 		return err
 	}
 	var header [4]byte

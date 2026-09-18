@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"strings"
 	"time"
@@ -17,6 +18,16 @@ func Handle(c net.Conn, db *engine.Database, mode, data string) {
 type HandleOptions struct {
 	Production bool
 	WALWriter  *storage.WALWriter
+	// Cluster, when set, routes statements through Raft quorum commits.
+	// Multi-statement session transactions are rejected in this mode;
+	// use atomic batches instead.
+	Cluster ClusterExec
+}
+
+// ClusterExec is the subset of cluster.Node used by SQL sessions.
+type ClusterExec interface {
+	Exec(ctx context.Context, sql string) (engine.Result, error)
+	ExecAtomic(ctx context.Context, sqls []string) ([]engine.Result, error)
 }
 
 func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, options HandleOptions) {
@@ -35,7 +46,7 @@ func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, optio
 	}
 	r := bufio.NewReader(c)
 	w := bufio.NewWriterSize(c, 64<<10)
-	s := &session{db: db, walWriter: options.WALWriter}
+	s := &session{db: db, walWriter: options.WALWriter, cluster: options.Cluster}
 	for {
 		q, err := readRequest(r)
 		if err != nil {
@@ -55,6 +66,7 @@ type session struct {
 	batch          bool
 	pendingPersist []string
 	walWriter      *storage.WALWriter
+	cluster        ClusterExec
 }
 
 func (s *session) active() *engine.Database {
@@ -66,6 +78,19 @@ func (s *session) active() *engine.Database {
 
 func executeRequest(q request, s *session, mode, data string) any {
 	if len(q.SQLs) > 0 {
+		if q.Atomic && s.cluster != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			results, err := s.cluster.ExecAtomic(ctx, q.SQLs)
+			if err != nil {
+				return map[string]string{"error": err.Error()}
+			}
+			out := make([]any, 0, len(results))
+			for _, r := range results {
+				out = append(out, r)
+			}
+			return out
+		}
 		s.batch = true
 		s.pendingPersist = nil
 		out := make([]any, 0, len(q.SQLs))
@@ -83,6 +108,19 @@ func executeRequest(q request, s *session, mode, data string) any {
 }
 
 func executeSQL(raw string, s *session, mode, data string) any {
+	if s.cluster != nil {
+		upper := strings.TrimSpace(strings.ToUpper(raw))
+		if upper == "BEGIN" || upper == "COMMIT" || upper == "ROLLBACK" {
+			return map[string]string{"error": "session transactions are not supported in cluster mode; send atomic batches instead"}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := s.cluster.Exec(ctx, raw)
+		if err != nil {
+			return map[string]string{"error": err.Error()}
+		}
+		return res
+	}
 	sql := strings.TrimSpace(strings.ToUpper(raw))
 	if sql == "BEGIN" {
 		if s.tx != nil {
@@ -134,6 +172,9 @@ func executeSQL(raw string, s *session, mode, data string) any {
 }
 
 func persistStatements(mode, data string, sqls []string, db *engine.Database, writer *storage.WALWriter) error {
+	// Cluster sessions return before recording pending statements, so sqls
+	// is empty here in cluster mode: Raft already appended the WAL side-copy
+	// on every member during commit.
 	if mode == "wal" {
 		if writer != nil {
 			return writer.Append(sqls)

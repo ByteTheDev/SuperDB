@@ -32,13 +32,17 @@ internal/server/protocol.go      Length-prefixed JSON protocol
 internal/server/persistence.go   Snapshot/WAL loading and persistence
 internal/server/backups.go       Timestamped backups and recovery
 internal/server/cluster.go       Bridge: start cluster node around local engine
-internal/cluster/node.go         Node lifecycle, Exec routing, status, RPC handlers
+internal/cluster/node.go         Node lifecycle, Raft writes/reads, ranges ops, RPC handlers
+internal/cluster/raft.go         hashicorp/raft wrapper + commit-tracking store decorator
+internal/cluster/fsm.go          Raft log entries (exec/range) and FSM glue
+internal/cluster/state.go        Deterministic apply, FSM snapshots, WAL side-copy
+internal/cluster/consensus/mux.go Single-port first-byte mux (internal RPC vs Raft)
 internal/cluster/identity.go     Persistent node/cluster IDs (cluster.json)
-internal/cluster/membership.go   Member directory, suspicion (never auto-delete)
+internal/cluster/membership.go   Member directory, regions, suspicion (never auto-delete)
 internal/cluster/transport.go    Internal length-prefixed JSON RPC + conn reuse
-internal/cluster/ranges.go       Range directory (single full-keyspace range today)
+internal/cluster/ranges.go       Range directory + table assignment + fenced ops
 internal/cluster/routing.go      Decentralized table/key -> range/node routing
-internal/cluster/replication.go  Replicator/WriteConcern (quorum explicitly pending)
+internal/cluster/replication.go  RaftReplicator/WriteConcern (quorum-enforced)
 internal/cluster/stats.go        Atomic observability counters
 internal/cluster/errors.go       Structured cluster errors
 internal/storage/format.go       SUPERDB1 encoding/decoding and zlib
@@ -116,7 +120,7 @@ Shared flags:
 - `--addr HOST:PORT`: TCP address, default `127.0.0.1:7654`.
 - `--mode memory|wal|snapshot`.
 
-Server-only flags include `--profile standard|production`, `--production`, `--backup-dir DIR`, `--backup-interval DURATION`, `--cluster-addr` (alias `--listen`), `--advertise`, and `--join`. Cluster mode is off unless `--cluster-addr` is set; see `docs/cluster.md`.
+Server-only flags include `--profile standard|production`, `--production`, `--backup-dir DIR`, `--backup-interval DURATION`, `--cluster-addr` (alias `--listen`), `--advertise`, `--join`, and `--region`. Cluster mode is off unless `--cluster-addr` is set; see `docs/cluster.md`. Cluster mode runs hashicorp/raft (new `go.mod` deps); session transactions are rejected there in favor of atomic batches.
 
 `status` reports configured values and local snapshot/WAL file sizes. `backup` copies active `.spdb` files. `restore` copies them into the data directory. `recover` validates and restores the newest timestamped snapshot backup. `compact` rewrites a snapshot from the loaded snapshot state.
 
@@ -247,7 +251,7 @@ After editing, run formatting, tests, vet, build, race tests when relevant, benc
 
 ## Known limitations and roadmap
 
-Not yet implemented: authentication, authorization, TLS, Raft replication/quorum/failover, range splitting/rebalancing, distributed transactions, Prometheus metrics, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Cluster foundation (identity, membership, transport, single range, routing, status) exists; see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check.
+Not yet implemented: authentication, authorization, TLS, sharded storage, auto-splitting, cross-shard transactions, Prometheus metrics, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Raft quorum writes/failover, range split/move/assign, atomic batches, and region placement exist (all voters hold all data); see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check.
 
 Recommended priorities:
 

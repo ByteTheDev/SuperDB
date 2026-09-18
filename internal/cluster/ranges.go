@@ -1,12 +1,12 @@
 package cluster
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 )
 
-// Range describes one keyspace partition. Initially a cluster holds a single
-// range covering the entire keyspace (StartKey "" to EndKey "").
+// Range describes one keyspace partition.
 type Range struct {
 	ID         uint64   `json:"id"`
 	StartKey   string   `json:"start_key"`
@@ -38,16 +38,19 @@ func (r Range) HasReplica(nodeID string) bool {
 	return false
 }
 
-// RangeStore is a thread-safe range directory.
+// RangeStore is a thread-safe range directory plus the table->range
+// assignment map. Mutations arrive only via committed Raft entries so every
+// member converges on the same directory.
 type RangeStore struct {
 	mu     sync.RWMutex
 	ranges map[uint64]Range
+	assign map[string]uint64
 	nextID uint64
 }
 
 // NewRangeStore creates an empty range directory.
 func NewRangeStore() *RangeStore {
-	return &RangeStore{ranges: make(map[uint64]Range), nextID: 1}
+	return &RangeStore{ranges: make(map[uint64]Range), assign: make(map[string]uint64), nextID: 1}
 }
 
 // EnsureSingleRange creates the initial full-keyspace range when none exists.
@@ -69,6 +72,10 @@ func (s *RangeStore) EnsureSingleRange(nodeID string) Range {
 func (s *RangeStore) All() []Range {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.allLocked()
+}
+
+func (s *RangeStore) allLocked() []Range {
 	out := make([]Range, 0, len(s.ranges))
 	for _, r := range s.ranges {
 		out = append(out, r)
@@ -89,6 +96,58 @@ func (s *RangeStore) Lookup(key string) (Range, error) {
 	return Range{}, NewError(CodeRangeNotFound, "no range owns key")
 }
 
+// ByID returns one range by ID.
+func (s *RangeStore) ByID(id uint64) (Range, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lookupLocked(id)
+}
+
+func (s *RangeStore) lookupLocked(id uint64) (Range, error) {
+	r, ok := s.ranges[id]
+	if !ok {
+		return Range{}, NewError(CodeRangeNotFound, fmt.Sprintf("range %d not found", id))
+	}
+	return r, nil
+}
+
+// TableRange resolves the range currently serving a table. Unassigned
+// tables deterministically fall back to the lowest-ID range.
+func (s *RangeStore) TableRange(table string) Range {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if id, ok := s.assign[table]; ok {
+		if r, ok := s.ranges[id]; ok {
+			return r
+		}
+	}
+	var best Range
+	first := true
+	for _, r := range s.ranges {
+		if first || r.ID < best.ID {
+			best, first = r, false
+		}
+	}
+	return best
+}
+
+// Assignment returns a copy of the table->range map.
+func (s *RangeStore) Assignment() map[string]uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.assignLocked()
+}
+
+func (s *RangeStore) assignLocked() map[string]uint64 {
+	out := make(map[string]uint64, len(s.assign))
+	for k, v := range s.assign {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *RangeStore) nextLocked() uint64 { return s.nextID }
+
 // ReplaceBulk replaces the directory from a remote snapshot (join path).
 func (s *RangeStore) ReplaceBulk(ranges []Range) {
 	s.mu.Lock()
@@ -107,6 +166,30 @@ func (s *RangeStore) ReplaceBulk(ranges []Range) {
 	}
 }
 
+// restoreLocked replaces directory, assignment, and ID counter from a Raft
+// snapshot image.
+func (s *RangeStore) restoreLocked(ranges []Range, assign map[string]uint64, nextID uint64) {
+	s.ranges = make(map[uint64]Range, len(ranges))
+	max := uint64(0)
+	for _, r := range ranges {
+		s.ranges[r.ID] = r
+		if r.ID > max {
+			max = r.ID
+		}
+	}
+	s.assign = make(map[string]uint64, len(assign))
+	for k, v := range assign {
+		s.assign[k] = v
+	}
+	s.nextID = nextID
+	if s.nextID <= max {
+		s.nextID = max + 1
+	}
+	if s.nextID == 0 {
+		s.nextID = 1
+	}
+}
+
 // UpdateLeader records a leader change and bumps generation.
 func (s *RangeStore) UpdateLeader(rangeID uint64, leader string) error {
 	s.mu.Lock()
@@ -118,5 +201,48 @@ func (s *RangeStore) UpdateLeader(rangeID uint64, leader string) error {
 	r.Leader = leader
 	r.Generation++
 	s.ranges[rangeID] = r
+	return nil
+}
+
+// SetRangeLeader tracks the Raft leader for serving without bumping the
+// fencing generation: elections are not range moves.
+func (s *RangeStore) SetRangeLeader(rangeID uint64, leader string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, ok := s.ranges[rangeID]; ok {
+		r.Leader = leader
+		s.ranges[rangeID] = r
+	}
+}
+
+// applyOpLocked applies a committed RangeOp verbatim after fencing checks.
+func (s *RangeStore) applyOpLocked(op *RangeOp) error {
+	for id, gen := range op.BaseGenerations {
+		r, ok := s.ranges[id]
+		if !ok {
+			return NewError(CodeRangeNotFound, fmt.Sprintf("range %d not found", id))
+		}
+		if r.Generation != gen {
+			return fmt.Errorf("stale range generation for %d: have %d want %d", id, r.Generation, gen)
+		}
+	}
+	for _, id := range op.Remove {
+		delete(s.ranges, id)
+	}
+	for _, r := range op.Ranges {
+		if r.ID == 0 {
+			r.ID = s.nextID
+			s.nextID++
+		} else if r.ID >= s.nextID {
+			s.nextID = r.ID + 1
+		}
+		s.ranges[r.ID] = r
+	}
+	for t, id := range op.Assign {
+		s.assign[t] = id
+	}
+	for _, t := range op.Unassign {
+		delete(s.assign, t)
+	}
 	return nil
 }

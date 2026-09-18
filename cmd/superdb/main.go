@@ -126,6 +126,7 @@ func runServer(args []string, globalProduction bool) {
 	fs.StringVar(clusterAddr, "listen", "", "alias for --cluster-addr")
 	advertise := fs.String("advertise", "", "advertised cluster address (defaults to --cluster-addr)")
 	join := fs.String("join", "", "comma-separated seed cluster address(es) to join")
+	region := fs.String("region", "", "region label for placement (optional)")
 	fs.Parse(args)
 	if *profile != "standard" && *profile != "production" {
 		log.Fatal("profile must be standard or production")
@@ -150,9 +151,10 @@ func runServer(args []string, globalProduction bool) {
 			log.Fatal(e)
 		}
 	}
-	// Cluster mode wraps the same local engine. Local mode (no
-	// --cluster-addr) initializes no cluster components and keeps the
-	// existing fast path with zero network overhead.
+	// Cluster mode wraps the same local engine in Raft consensus. Local
+	// mode (no --cluster-addr) initializes no cluster components and keeps
+	// the existing fast path with zero network overhead.
+	var clusterExec server.ClusterExec
 	if *clusterAddr != "" {
 		adv := *advertise
 		if adv == "" {
@@ -167,14 +169,15 @@ func runServer(args []string, globalProduction bool) {
 			}
 		}
 		node, err := server.StartClusterNode(server.ClusterConfig{
-			DataDir: *data, ListenAddr: *clusterAddr, AdvertiseAddr: adv, JoinAddrs: seeds, DB: db,
+			DataDir: *data, ListenAddr: *clusterAddr, AdvertiseAddr: adv, JoinAddrs: seeds, Region: *region, DB: db,
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer node.Shutdown()
+		clusterExec = node
 		st := node.Status()
-		log.Printf("SuperDB cluster node %s cluster %s listening internal %s", st.NodeID, st.ClusterID, *clusterAddr)
+		log.Printf("SuperDB cluster node %s cluster %s region %q raft %s listening internal %s", st.NodeID, st.ClusterID, st.Region, st.Raft.State, *clusterAddr)
 	}
 	var walWriter *storage.WALWriter
 	if *mode == "wal" {
@@ -200,7 +203,7 @@ func runServer(args []string, globalProduction bool) {
 			log.Print(e)
 			continue
 		}
-		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter})
+		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter, Cluster: clusterExec})
 	}
 }
 

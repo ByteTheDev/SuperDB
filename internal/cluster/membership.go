@@ -22,6 +22,7 @@ type Member struct {
 	State    State     `json:"state"`
 	LastSeen time.Time `json:"last_seen"`
 	Version  uint64    `json:"version"`
+	Region   string    `json:"region,omitempty"`
 }
 
 // Membership is a thread-safe registry of known nodes.
@@ -76,7 +77,50 @@ func (m *Membership) MergeBulk(remote []Member) {
 		if r.ID == "" || r.Addr == "" {
 			continue
 		}
-		m.Upsert(r.ID, r.Addr, r.State, r.Version)
+		m.UpsertMember(r)
+	}
+}
+
+// UpsertMember adds or updates a member from a full descriptor.
+func (m *Membership) UpsertMember(r Member) {
+	if r.ID == "" || r.Addr == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing, ok := m.members[r.ID]
+	if !ok {
+		m.version++
+		r.LastSeen = time.Now()
+		m.members[r.ID] = &Member{ID: r.ID, Addr: r.Addr, State: r.State, LastSeen: r.LastSeen, Version: r.Version, Region: r.Region}
+		return
+	}
+	if existing.State == StateRemoved && r.State != StateAlive {
+		return
+	}
+	if r.Version >= existing.Version {
+		existing.Addr = r.Addr
+		existing.State = r.State
+		existing.Version = r.Version
+		if r.Region != "" {
+			existing.Region = r.Region
+		}
+		m.version++
+	} else if r.Region != "" {
+		existing.Region = r.Region
+	}
+	existing.LastSeen = time.Now()
+}
+
+// SetRegion records the region label of a member.
+func (m *Membership) SetRegion(id, region string) {
+	if region == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if mb, ok := m.members[id]; ok {
+		mb.Region = region
 	}
 }
 

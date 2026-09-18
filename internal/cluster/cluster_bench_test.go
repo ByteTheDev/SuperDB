@@ -3,10 +3,13 @@ package cluster
 import (
 	"context"
 	"net"
+	"strconv"
 	"testing"
 
 	"superdb/internal/engine"
 )
+
+func itoa(i int) string { return strconv.Itoa(i) }
 
 func benchNode(b *testing.B, db *engine.Database) (*Node, string) {
 	b.Helper()
@@ -61,6 +64,22 @@ func BenchmarkClusterLocalExec(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := n.Exec(ctx, "SELECT * FROM t"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Write commits go through Raft quorum: orders of magnitude slower than
+// local reads by design (durability + replication per write).
+func BenchmarkClusterWriteCommit(b *testing.B) {
+	n, _ := benchNode(b, nil)
+	ctx := context.Background()
+	if _, err := n.Exec(ctx, "CREATE TABLE t (id INT PRIMARY KEY, v INT)"); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := n.Exec(ctx, "INSERT INTO t VALUES ("+itoa(i)+", 1)"); err != nil {
 			b.Fatal(err)
 		}
 	}

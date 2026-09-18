@@ -14,6 +14,7 @@ type ClusterConfig struct {
 	ListenAddr    string
 	AdvertiseAddr string
 	JoinAddrs     []string
+	Region        string
 	DB            *engine.Database
 }
 
@@ -26,6 +27,7 @@ func StartClusterNode(cfg ClusterConfig) (*cluster.Node, error) {
 		ListenAddr:        cfg.ListenAddr,
 		AdvertiseAddr:     cfg.AdvertiseAddr,
 		JoinAddrs:         cfg.JoinAddrs,
+		Region:            cfg.Region,
 		HeartbeatInterval: 500 * time.Millisecond,
 		PingTimeout:       2 * time.Second,
 		SuspectAfter:      5 * time.Second,

@@ -115,10 +115,12 @@ go run ./cmd/superdb server --mode wal --data ./node1 --cluster-addr 127.0.0.1:7
 go run ./cmd/superdb server --mode wal --data ./node2 --cluster-addr 127.0.0.1:7433 --join 127.0.0.1:7432
 ```
 
-Today this provides persistent node/cluster identity, membership with failure
-suspicion (never auto-delete), health/metadata/range/forward RPCs,
-range-based routing, and status counters. Replication, failover, range
-splitting, and distributed transactions are explicitly **not** implemented yet.
+Today this provides Raft quorum writes with automatic failover (hashicorp/raft,
+Bolt-backed), persistent node/cluster identity, membership with failure
+suspicion (never auto-delete), range split/move/assign, atomic batches, region
+placement, and status counters. All voters currently hold all data (ranges
+partition serving, not bytes); sharded storage, auto-splitting, and
+cross-shard transactions are explicitly **not** implemented yet.
 See [docs/cluster.md](docs/cluster.md) for the honest implemented-vs-planned split and benchmark numbers.
 
 ## Supported SQL

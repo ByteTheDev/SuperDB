@@ -36,9 +36,15 @@ func (r *Router) RouteKey(table, key string) (Route, error) {
 	return r.routeToRange(rng), nil
 }
 
-// RouteTable routes table-level operations (DDL, full scans).
+// RouteTable routes table-level operations (DDL, full scans) using the
+// committed table assignment when present.
 func (r *Router) RouteTable(table string) (Route, error) {
-	return r.RouteKey(strings.ToLower(table), "")
+	lowered := strings.ToLower(table)
+	assigned := r.ranges.TableRange(lowered)
+	if assigned.ID != 0 {
+		return r.routeToRange(assigned), nil
+	}
+	return r.RouteKey(lowered, "")
 }
 
 func (r *Router) routeToRange(rng Range) Route {

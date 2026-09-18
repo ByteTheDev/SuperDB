@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"time"
 )
 
 // ReplicaRole describes what a node does for a range.
@@ -27,51 +28,42 @@ type ReplicaState struct {
 // WriteConcern states the durability condition a write must satisfy before
 // it may be acknowledged to a client.
 type WriteConcern struct {
-	// RequiredAcks is the number of replicas (including local) that must
-	// durably apply the write. 1 = local durability only.
+	// RequiredAcks is the number of replicas that must durably commit the
+	// write. 1 means leader commit (still a Raft quorum round); values
+	// above the voter count are rejected explicitly, never faked.
 	RequiredAcks int
 }
 
 // Replicator applies writes for replicated ranges.
 type Replicator interface {
-	// Replicate durably applies sql for rangeID and blocks until concern is
-	// satisfied or ctx ends. It must never acknowledge before durability.
+	// Replicate commits sql for rangeID and blocks until concern is
+	// satisfied or ctx ends. It never acknowledges before durability.
 	Replicate(ctx context.Context, rangeID uint64, sql string, concern WriteConcern) error
 	// State returns the local replica state for a range.
 	State(rangeID uint64) (ReplicaState, error)
 }
 
-// LocalReplicator implements single-copy durability: the write is
-// acknowledged only after the caller has applied it locally. Quorum writes
-// (RequiredAcks > 1) are explicitly rejected until Raft exists.
-type LocalReplicator struct {
-	apply func(rangeID uint64, sql string) error
-	state func(rangeID uint64) (ReplicaState, error)
+// RaftReplicator commits writes through the Raft log: acknowledgement
+// happens only after a quorum has durably stored the entry.
+type RaftReplicator struct {
+	node *Node
 }
 
-// NewLocalReplicator wires local apply/state callbacks.
-func NewLocalReplicator(
-	apply func(rangeID uint64, sql string) error,
-	state func(rangeID uint64) (ReplicaState, error),
-) *LocalReplicator {
-	return &LocalReplicator{apply: apply, state: state}
+// Replicate proposes one SQL statement as a Raft entry.
+func (r *RaftReplicator) Replicate(ctx context.Context, rangeID uint64, sql string, concern WriteConcern) error {
+	_, err := r.node.writeCommitted(ctx, []string{sql}, false, rangeID, concern)
+	return err
 }
 
-// Replicate applies the write locally and enforces explicit durability.
-func (r *LocalReplicator) Replicate(ctx context.Context, rangeID uint64, sql string, concern WriteConcern) error {
-	if concern.RequiredAcks > 1 {
-		return NewError(CodeNoQuorum, "quorum writes require Raft consensus (not implemented)")
-	}
-	if err := ctx.Err(); err != nil {
-		return NewError(CodeTimeout, "replicate cancelled: "+err.Error())
-	}
-	if err := r.apply(rangeID, sql); err != nil {
-		return err
-	}
-	return nil
+// State delegates to node replica state.
+func (r *RaftReplicator) State(rangeID uint64) (ReplicaState, error) {
+	return r.node.replicaState(rangeID)
 }
 
-// State delegates to the wired state callback.
-func (r *LocalReplicator) State(rangeID uint64) (ReplicaState, error) {
-	return r.state(rangeID)
+// proposeTimeout bounds a single commit round.
+func proposeTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, 10*time.Second)
 }
