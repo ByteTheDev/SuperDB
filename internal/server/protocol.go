@@ -13,6 +13,10 @@ const maxRequestSize = 16 << 20
 type request struct {
 	SQL  string   `json:"sql,omitempty"`
 	SQLs []string `json:"sqls,omitempty"`
+	// Atomic commits SQLs as one all-or-nothing unit. Honored in cluster
+	// mode (single Raft entry); in local mode the batch still stops at the
+	// first error but earlier statements are NOT rolled back.
+	Atomic bool `json:"atomic,omitempty"`
 }
 
 func readRequest(r *bufio.Reader) (request, error) {

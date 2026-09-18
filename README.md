@@ -105,6 +105,24 @@ The common flags are `--data-dir` (also available as `--data`), `--addr`, and `-
 
 WAL and snapshot files use a versioned, zlib-compressed SUPERDB storage format. Older line-based WAL files, plain JSON snapshots, and the previous filenames remain readable. The TCP API still sends and receives normal JSON.
 
+## Cluster mode (foundation)
+
+Single process behavior is unchanged. To run nodes that discover each other,
+add `--cluster-addr` (internal traffic) alongside the usual `--addr` (client SQL):
+
+```bash
+go run ./cmd/superdb server --mode wal --data ./node1 --cluster-addr 127.0.0.1:7432
+go run ./cmd/superdb server --mode wal --data ./node2 --cluster-addr 127.0.0.1:7433 --join 127.0.0.1:7432
+```
+
+Today this provides Raft quorum writes with automatic failover (hashicorp/raft,
+Bolt-backed), persistent node/cluster identity, membership with failure
+suspicion (never auto-delete), range split/move/assign, atomic batches, region
+placement, and status counters. All voters currently hold all data (ranges
+partition serving, not bytes); sharded storage, auto-splitting, and
+cross-shard transactions are explicitly **not** implemented yet.
+See [docs/cluster.md](docs/cluster.md) for the honest implemented-vs-planned split and benchmark numbers.
+
 ## Supported SQL
 
 `CREATE TABLE`, `INSERT`, `SELECT`, `UPDATE`, `DELETE`, `BEGIN`, `COMMIT`, and `ROLLBACK`.

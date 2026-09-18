@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"path/filepath"
@@ -11,6 +13,75 @@ import (
 	"superdb/internal/engine"
 	"superdb/internal/storage"
 )
+
+// stubCluster routes through a plain engine while recording atomic batches.
+type stubCluster struct {
+	db       *engine.Database
+	atomics  int
+	singles  int
+	failNext error
+}
+
+func (s *stubCluster) Exec(_ context.Context, sql string) (engine.Result, error) {
+	s.singles++
+	if s.failNext != nil {
+		return engine.Result{}, s.failNext
+	}
+	return s.db.Exec(sql)
+}
+
+func (s *stubCluster) ExecAtomic(_ context.Context, sqls []string) ([]engine.Result, error) {
+	s.atomics++
+	if s.failNext != nil {
+		return nil, s.failNext
+	}
+	clone, err := s.db.Clone()
+	if err != nil {
+		return nil, err
+	}
+	for _, sql := range sqls {
+		if _, err := clone.Exec(sql); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.db.ReplaceFrom(clone); err != nil {
+		return nil, err
+	}
+	return []engine.Result{{Affected: len(sqls)}}, nil
+}
+
+func TestClusterAtomicBatch(t *testing.T) {
+	stub := &stubCluster{db: engine.New()}
+	s := &session{db: stub.db, cluster: stub}
+	out := executeRequest(request{SQLs: []string{
+		"CREATE TABLE t (id INT PRIMARY KEY)",
+		"INSERT INTO t VALUES (1)",
+	}, Atomic: true}, s, "memory", t.TempDir())
+	results, ok := out.([]any)
+	if !ok || len(results) != 1 || stub.atomics != 1 || stub.singles != 0 {
+		t.Fatalf("atomic batch must take the single-commit path: %#v", out)
+	}
+}
+
+func TestClusterRejectsTransactions(t *testing.T) {
+	stub := &stubCluster{db: engine.New()}
+	s := &session{db: stub.db, cluster: stub}
+	out := executeSQL("BEGIN", s, "memory", t.TempDir())
+	m, ok := out.(map[string]string)
+	if !ok || m["error"] == "" {
+		t.Fatalf("BEGIN must be rejected in cluster mode: %#v", out)
+	}
+}
+
+func TestClusterErrorSurfaces(t *testing.T) {
+	stub := &stubCluster{db: engine.New(), failNext: errors.New("no leader")}
+	s := &session{db: stub.db, cluster: stub}
+	out := executeSQL("INSERT INTO t VALUES (1)", s, "memory", t.TempDir())
+	m, ok := out.(map[string]string)
+	if !ok || m["error"] != "no leader" {
+		t.Fatalf("cluster errors must surface: %#v", out)
+	}
+}
 
 func TestLoadSnapshotRestoresDatabase(t *testing.T) {
 	dir := t.TempDir()
