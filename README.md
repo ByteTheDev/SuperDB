@@ -2,6 +2,39 @@
 
 SuperDB is a lightweight, fast SQL table database written in Go. It runs as a standalone TCP server and supports an in-memory engine with configurable durability.
 
+## Install
+
+Release packages include both `superdb` (the server and administration commands)
+and `superdb-cli` (the SQL client) for Linux, macOS, and Windows on amd64 and
+arm64. Download a package from the [GitHub Releases](https://github.com/ByteTheDev/SuperDB/releases)
+page, or use the platform installer scripts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ByteTheDev/SuperDB/master/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/ByteTheDev/SuperDB/master/install.ps1 | iex
+```
+
+The scripts download the latest release, verify its SHA-256 checksum, and install
+both binaries. Set `SUPERDB_VERSION` to install a specific version. On Unix, use
+`--install-dir DIR`; on Windows, use `-InstallDir DIR`.
+
+Verify an installation with:
+
+```bash
+superdb --version
+superdb-cli --version
+```
+
+Maintainers create a release by pushing a version tag such as `v0.1.0`:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Run
 
 ```bash
