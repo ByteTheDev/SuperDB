@@ -44,7 +44,7 @@ func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, optio
 			_ = tcp.SetWriteBuffer(256 << 10)
 		}
 	}
-	r := bufio.NewReader(c)
+	r := bufio.NewReaderSize(c, 64<<10)
 	w := bufio.NewWriterSize(c, 64<<10)
 	s := &session{db: db, walWriter: options.WALWriter, cluster: options.Cluster}
 	for {
@@ -109,8 +109,8 @@ func executeRequest(q request, s *session, mode, data string) any {
 
 func executeSQL(raw string, s *session, mode, data string) any {
 	if s.cluster != nil {
-		upper := strings.TrimSpace(strings.ToUpper(raw))
-		if upper == "BEGIN" || upper == "COMMIT" || upper == "ROLLBACK" {
+		trimmed := strings.TrimSpace(raw)
+		if equalFold(trimmed, "BEGIN") || equalFold(trimmed, "COMMIT") || equalFold(trimmed, "ROLLBACK") {
 			return map[string]string{"error": "session transactions are not supported in cluster mode; send atomic batches instead"}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -121,8 +121,8 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		}
 		return res
 	}
-	sql := strings.TrimSpace(strings.ToUpper(raw))
-	if sql == "BEGIN" {
+	sql := strings.TrimSpace(raw)
+	if equalFold(sql, "BEGIN") {
 		if s.tx != nil {
 			return map[string]string{"error": "transaction already active"}
 		}
@@ -134,7 +134,7 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		s.txSQL = nil
 		return map[string]string{"message": "BEGIN ok"}
 	}
-	if sql == "ROLLBACK" {
+	if equalFold(sql, "ROLLBACK") {
 		if s.tx == nil {
 			return map[string]string{"error": "no transaction active"}
 		}
@@ -142,7 +142,7 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		s.txSQL = nil
 		return map[string]string{"message": "ROLLBACK ok"}
 	}
-	if sql == "COMMIT" {
+	if equalFold(sql, "COMMIT") {
 		if s.tx == nil {
 			return map[string]string{"error": "no transaction active"}
 		}
@@ -169,6 +169,25 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		return map[string]string{"error": "persist: " + err.Error()}
 	}
 	return res
+}
+
+// equalFold reports whether s equals keyword case-insensitively without
+// allocating the full upper-cased query string.
+func equalFold(s, keyword string) bool {
+	if len(s) != len(keyword) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		k := keyword[i]
+		if 'a' <= c && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c != k {
+			return false
+		}
+	}
+	return true
 }
 
 func persistStatements(mode, data string, sqls []string, db *engine.Database, writer *storage.WALWriter) error {

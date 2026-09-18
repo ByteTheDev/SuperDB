@@ -2,13 +2,11 @@ package engine
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 )
 
 func (d *Database) update(s string) (Result, error) {
-	u := strings.ToUpper(s)
-	si := strings.Index(u, "SET")
+	si := indexFold(s, "SET")
 	if si < 0 {
 		return Result{}, errors.New("UPDATE requires SET")
 	}
@@ -21,7 +19,7 @@ func (d *Database) update(s string) (Result, error) {
 		return Result{}, e
 	}
 	tail := s[si+3:]
-	wi := strings.Index(strings.ToUpper(tail), "WHERE")
+	wi := indexFold(tail, "WHERE")
 	assign := strings.TrimSpace(tail)
 	where := ""
 	if wi >= 0 {
@@ -66,7 +64,7 @@ func (d *Database) update(s string) (Result, error) {
 	}
 	n := 0
 	for key, row := range t.Rows {
-		if wc != "" && fmt.Sprint(row[wc]) != wv {
+		if wc != "" && !matchWhereValue(row[wc], wv) {
 			continue
 		}
 		t.removeIndexValue(col, valueKey(row[col]), key)

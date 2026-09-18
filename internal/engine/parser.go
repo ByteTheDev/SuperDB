@@ -7,6 +7,20 @@ import (
 	"strings"
 )
 
+// matchWhereValue compares a stored row value against the raw (unquoted)
+// WHERE value string. It replicates the existing fmt.Sprint comparison
+// exactly while fast-pathing strings and bools without formatting.
+func matchWhereValue(rowValue any, wv string) bool {
+	switch v := rowValue.(type) {
+	case string:
+		return v == wv
+	case bool:
+		return (v && wv == "true") || (!v && wv == "false")
+	default:
+		return fmt.Sprint(rowValue) == wv
+	}
+}
+
 func splitVals(s string) []string {
 	var out []string
 	start := 0
@@ -43,8 +57,7 @@ func parseVal(raw string, typ Type) (any, error) {
 }
 
 func filter(s string) (string, string) {
-	u := strings.ToUpper(s)
-	i := strings.Index(u, "WHERE")
+	i := indexFold(s, "WHERE")
 	if i < 0 {
 		return "", ""
 	}
@@ -56,7 +69,6 @@ func filter(s string) (string, string) {
 }
 
 func splitLogical(s, operator string) []string {
-	upper := strings.ToUpper(s)
 	needle := " " + operator + " "
 	var out []string
 	start := 0
@@ -65,7 +77,7 @@ func splitLogical(s, operator string) []string {
 		if s[i] == '\'' {
 			quote = !quote
 		}
-		if !quote && upper[i:i+len(needle)] == needle {
+		if !quote && foldEqualAt(s[i:], needle) {
 			out = append(out, strings.TrimSpace(s[start:i]))
 			start = i + len(needle)
 			i += len(needle) - 1

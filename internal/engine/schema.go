@@ -53,6 +53,13 @@ func valueKey(value any) string {
 		return strconv.FormatInt(v, 10)
 	case float64:
 		return strconv.FormatFloat(v, 'g', -1, 64)
+	case string:
+		return v
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
 	case nil:
 		return "NULL"
 	default:
