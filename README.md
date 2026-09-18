@@ -28,6 +28,22 @@ superdb --version
 superdb-cli --version
 ```
 
+The client is compiled natively for Linux and macOS as well as Windows and uses
+the same TCP/JSON API on every supported platform. It does not require SQLite
+or any platform-specific runtime.
+
+Update an existing installation without downloading the package manually:
+
+```bash
+superdb update --check
+superdb update
+```
+
+Use `superdb update --version 0.1.1` to select a specific release. The updater
+downloads the matching platform archive, verifies its SHA-256 checksum, and
+updates both `superdb` and `superdb-cli`. On Windows, stop the running server
+before updating if the updater reports that a binary is locked.
+
 Maintainers create a release by pushing a version tag such as `v0.1.0`:
 
 ```bash

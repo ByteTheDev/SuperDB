@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -12,6 +14,7 @@ import (
 	"superdb/internal/engine"
 	"superdb/internal/server"
 	"superdb/internal/storage"
+	"superdb/internal/updater"
 	"time"
 )
 
@@ -65,12 +68,16 @@ func main() {
 		runCompact(args)
 		return
 	}
+	if command == "update" {
+		runUpdate(args)
+		return
+	}
 	fmt.Printf("unknown command %q\n", command)
 	printUsage()
 }
 
 func printUsage() {
-	fmt.Println("usage: superdb [server|status|backup|restore|recover|compact] [common flags]")
+	fmt.Println("usage: superdb [server|status|backup|restore|recover|compact|update] [common flags]")
 	fmt.Println("       superdb --production [server flags]")
 }
 
@@ -258,6 +265,45 @@ func runCompact(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Compacted snapshot at %s\n", storage.SnapshotPath(*data))
+}
+
+func runUpdate(args []string) {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	repository := fs.String("repository", updater.DefaultRepository, "GitHub repository in owner/name form")
+	releaseVersion := fs.String("version", "", "target release version, for example 0.1.1 (latest when omitted)")
+	installDir := fs.String("install-dir", "", "directory containing the installed SuperDB binaries")
+	check := fs.Bool("check", false, "check for an available update without installing it")
+	fs.Parse(args)
+	ctx := context.Background()
+	release, err := updater.Latest(ctx, *repository)
+	if err != nil {
+		log.Fatal(err)
+	}
+	latest := updater.Version(release.TagName)
+	if *check {
+		if version != "dev" && updater.Version(version) == latest {
+			fmt.Printf("SuperDB %s is up to date\n", version)
+			return
+		}
+		fmt.Printf("SuperDB update available: %s\n", latest)
+		return
+	}
+	target := *releaseVersion
+	if target == "" {
+		target = latest
+	}
+	if version != "dev" && updater.Version(version) == updater.Version(target) {
+		fmt.Printf("SuperDB %s is already installed\n", version)
+		return
+	}
+	if err := updater.Update(ctx, *repository, target, *installDir); err != nil {
+		if errors.Is(err, updater.ErrUpdateScheduled) {
+			fmt.Printf("SuperDB %s update scheduled; restart SuperDB to use it\n", updater.Version(target))
+			return
+		}
+		log.Fatal(err)
+	}
+	fmt.Printf("Updated SuperDB to %s\n", updater.Version(target))
 }
 
 func copyFile(source, destination string) error {

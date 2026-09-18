@@ -25,18 +25,24 @@ if (Test-Path $PackageDir) {
 New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ArchiveDir | Out-Null
 
+$oldCGOEnabled = $env:CGO_ENABLED
+$oldGOOS = $env:GOOS
+$oldGOARCH = $env:GOARCH
+$ldflags = "-s -w -X main.version=$Version"
 $env:CGO_ENABLED = "0"
 $env:GOOS = $GOOS
 $env:GOARCH = $GOARCH
-$ldflags = "-s -w -X main.version=$Version"
 Push-Location $RootDir
 try {
-    & go build -trimpath -ldflags $ldflags -o (Join-Path $PackageDir "superdb$Extension") ./cmd/superdb
-    if ($LASTEXITCODE -ne 0) { throw "go build failed for superdb" }
-    & go build -trimpath -ldflags $ldflags -o (Join-Path $PackageDir "superdb-cli$Extension") ./cmd/superdb-cli
-    if ($LASTEXITCODE -ne 0) { throw "go build failed for superdb-cli" }
+	& go build -trimpath -ldflags $ldflags -o (Join-Path $PackageDir "superdb$Extension") ./cmd/superdb
+	if ($LASTEXITCODE -ne 0) { throw "go build failed for superdb" }
+	& go build -trimpath -ldflags $ldflags -o (Join-Path $PackageDir "superdb-cli$Extension") ./cmd/superdb-cli
+	if ($LASTEXITCODE -ne 0) { throw "go build failed for superdb-cli" }
 } finally {
-    Pop-Location
+	Pop-Location
+	$env:CGO_ENABLED = $oldCGOEnabled
+	$env:GOOS = $oldGOOS
+	$env:GOARCH = $oldGOARCH
 }
 Copy-Item -LiteralPath (Join-Path $RootDir "README.md") -Destination $PackageDir
 
