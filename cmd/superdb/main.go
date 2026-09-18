@@ -122,6 +122,10 @@ func runServer(args []string, globalProduction bool) {
 	backupInterval := fs.Duration("backup-interval", 1*time.Hour, "automatic backup interval")
 	production := fs.Bool("production", globalProduction, "use the production performance and durability profile")
 	profile := fs.String("profile", "standard", "server profile: standard or production")
+	clusterAddr := fs.String("cluster-addr", "", "internal cluster listen address (empty disables cluster mode)")
+	fs.StringVar(clusterAddr, "listen", "", "alias for --cluster-addr")
+	advertise := fs.String("advertise", "", "advertised cluster address (defaults to --cluster-addr)")
+	join := fs.String("join", "", "comma-separated seed cluster address(es) to join")
 	fs.Parse(args)
 	if *profile != "standard" && *profile != "production" {
 		log.Fatal("profile must be standard or production")
@@ -145,6 +149,32 @@ func runServer(args []string, globalProduction bool) {
 		if e := server.ReplayWAL(*data, db); e != nil {
 			log.Fatal(e)
 		}
+	}
+	// Cluster mode wraps the same local engine. Local mode (no
+	// --cluster-addr) initializes no cluster components and keeps the
+	// existing fast path with zero network overhead.
+	if *clusterAddr != "" {
+		adv := *advertise
+		if adv == "" {
+			adv = *clusterAddr
+		}
+		var seeds []string
+		if *join != "" {
+			for _, s := range strings.Split(*join, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					seeds = append(seeds, s)
+				}
+			}
+		}
+		node, err := server.StartClusterNode(server.ClusterConfig{
+			DataDir: *data, ListenAddr: *clusterAddr, AdvertiseAddr: adv, JoinAddrs: seeds, DB: db,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer node.Shutdown()
+		st := node.Status()
+		log.Printf("SuperDB cluster node %s cluster %s listening internal %s", st.NodeID, st.ClusterID, *clusterAddr)
 	}
 	var walWriter *storage.WALWriter
 	if *mode == "wal" {
