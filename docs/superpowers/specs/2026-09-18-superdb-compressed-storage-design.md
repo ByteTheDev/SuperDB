@@ -20,13 +20,13 @@ The format uses only Go standard-library primitives and a versioned SUPERDB head
 
 ### Snapshot
 
-The file contains a fixed header identifying a SuperDB snapshot and its format version, followed by a zlib stream containing the existing JSON representation of `engine.Database`.
+By default, the file is `SUPERDB/snapshot.spdb`. It contains a fixed header identifying a SuperDB snapshot and its format version, followed by a zlib stream containing the existing JSON representation of `engine.Database`.
 
 Snapshot loading first recognizes the SUPERDB header. If it is absent, the loader attempts to parse the file as legacy JSON. Invalid headers, decompression errors, and invalid JSON are returned as startup errors.
 
 ### WAL
 
-Each append is one framed record containing a SUPERDB WAL magic/version marker, the compressed and uncompressed payload lengths, and a zlib-compressed SQL statement. Records are independently decodable so appends do not require rewriting the whole file.
+By default, the file is `SUPERDB/wal.spdb`. Each append is one framed record containing a SUPERDB WAL magic/version marker, the compressed and uncompressed payload lengths, and a zlib-compressed SQL statement. Records are independently decodable so appends do not require rewriting the whole file.
 
 Replay detects the framed format and decodes every record. If the marker is absent, it falls back to the existing newline-delimited SQL format. Truncated or corrupt framed records fail replay with an error that identifies the WAL record.
 
@@ -42,7 +42,7 @@ Replay detects the framed format and decodes every record. If the marker is abse
 
 - Snapshot writes go to a temporary file in the same directory, then replace the target file, preventing a partially written snapshot from being treated as valid.
 - The file format is explicitly versioned so future SUPERDB formats can be rejected or added without guessing.
-- Existing files remain readable; new writes use the compressed format.
+- Existing files and the previous `superdb.snapshot`/`superdb.wal` filenames remain readable; new writes use the compressed `.spdb` format.
 - Network framing and JSON payloads remain unchanged, so the current CLI continues to work.
 
 ## Testing

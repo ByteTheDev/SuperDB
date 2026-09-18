@@ -1,0 +1,15 @@
+# Go build artifacts
+/superdb
+/superdb-cli
+*.exe
+*.test
+*.out
+
+# Local database data
+/data/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
