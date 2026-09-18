@@ -30,6 +30,17 @@ go run ./cmd/superdb recover --backup-dir ./BACKUPS --data-dir ./SUPERDB
 The server writes timestamped snapshots to the backup directory. `recover` validates
 the newest snapshot before replacing the active snapshot.
 
+For the production profile, use either form:
+
+```bash
+go run ./cmd/superdb server --production --data ./SUPERDB
+go run ./cmd/superdb --production --data ./SUPERDB
+```
+
+Production defaults to WAL durability, enables TCP keep-alive, and uses larger
+socket buffers. Use `--profile standard` or omit the flag for the normal profile;
+explicit `--mode` settings still override the production WAL default.
+
 ### Developer commands
 
 Run `go run ./cmd/superdb` with no command to open the interactive menu. Every menu action is also available directly:

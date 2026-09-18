@@ -21,6 +21,50 @@ func TestCRUD(t *testing.T) {
 		t.Fatal(e, r)
 	}
 }
+
+func TestBatchAndExpandedQueries(t *testing.T) {
+	d := New()
+	if _, err := d.Exec("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score INT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec("INSERT INTO users VALUES (1, 'Ada', 9), (2, 'Grace', 7), (3, 'Linus', 10)"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := d.Exec("SELECT name, score FROM users WHERE score = 9 OR score = 10 ORDER BY score DESC LIMIT 1")
+	if err != nil || len(result.Rows) != 1 || result.Rows[0][0] != "Linus" {
+		t.Fatalf("expanded select mismatch: result=%+v err=%v", result, err)
+	}
+	result, err = d.Exec("SELECT COUNT(*) FROM users WHERE score = 9 OR score = 10")
+	if err != nil || len(result.Rows) != 1 || result.Rows[0][0] != 2 {
+		t.Fatalf("aggregate mismatch: result=%+v err=%v", result, err)
+	}
+	results, err := d.ExecBatch([]string{"UPDATE users SET score = 8 WHERE id = 2", "DELETE FROM users WHERE id = 1"})
+	if err != nil || len(results) != 2 || results[0].Affected != 1 || results[1].Affected != 1 {
+		t.Fatalf("batch mismatch: results=%+v err=%v", results, err)
+	}
+}
+
+func TestIndexesAndAlterTable(t *testing.T) {
+	d := New()
+	for _, query := range []string{
+		"CREATE TABLE users (id INT PRIMARY KEY, name TEXT)",
+		"INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace')",
+		"CREATE INDEX users_name ON users (name)",
+		"ALTER TABLE users ADD COLUMN active BOOL",
+	} {
+		if _, err := d.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := d.Exec("SELECT id FROM users WHERE name = 'Grace'")
+	if err != nil || len(result.Rows) != 1 || result.Rows[0][0] != int64(2) {
+		t.Fatalf("indexed query mismatch: result=%+v err=%v", result, err)
+	}
+	result, err = d.Exec("SELECT active FROM users WHERE id = 1")
+	if err != nil || len(result.Rows) != 1 || result.Rows[0][0] != nil {
+		t.Fatalf("altered column mismatch: result=%+v err=%v", result, err)
+	}
+}
 func BenchmarkPrimaryKeyLookup(b *testing.B) {
 	d := New()
 	d.Exec("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")

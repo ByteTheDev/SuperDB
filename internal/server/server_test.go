@@ -71,6 +71,47 @@ func TestHandleReturnsNormalJSON(t *testing.T) {
 	<-done
 }
 
+func TestHandleBatchAndTransaction(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	db := engine.New()
+	done := make(chan struct{})
+	go func() {
+		Handle(serverConn, db, "memory", t.TempDir())
+		close(done)
+	}()
+	request, _ := json.Marshal(map[string]any{"sqls": []string{
+		"BEGIN",
+		"CREATE TABLE users (id INT PRIMARY KEY, name TEXT)",
+		"INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace')",
+		"COMMIT",
+	}})
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(request)))
+	if _, err := clientConn.Write(header[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clientConn.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFull(clientConn, header[:]); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, binary.BigEndian.Uint32(header[:]))
+	if _, err := readFull(clientConn, response); err != nil {
+		t.Fatal(err)
+	}
+	var results []any
+	if err := json.Unmarshal(response, &results); err != nil || len(results) != 4 {
+		t.Fatalf("batch response mismatch: results=%#v err=%v", results, err)
+	}
+	clientConn.Close()
+	<-done
+	result, err := db.Exec("SELECT COUNT(*) FROM users")
+	if err != nil || result.Rows[0][0] != 2 {
+		t.Fatalf("transaction did not commit: result=%+v err=%v", result, err)
+	}
+}
+
 func readFull(r io.Reader, b []byte) (int, error) {
 	n := 0
 	for n < len(b) {

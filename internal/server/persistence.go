@@ -34,7 +34,11 @@ func LoadSnapshot(dir string, db *engine.Database) error {
 }
 
 func appendWAL(dir, sql string) error {
-	return storage.AppendWAL(storage.WALPath(dir), sql)
+	return appendWALBatch(dir, []string{sql})
+}
+
+func appendWALBatch(dir string, sqls []string) error {
+	return storage.AppendWALBatch(storage.WALPath(dir), sqls)
 }
 
 func saveSnapshot(dir string, db *engine.Database) error {

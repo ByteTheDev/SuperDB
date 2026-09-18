@@ -55,17 +55,24 @@ func (d *Database) update(s string) (Result, error) {
 	defer t.mu.Unlock()
 	if wc != "" && wc == t.primaryColumn() {
 		if row, ok := t.Rows[wv]; ok {
+			old := valueKey(row[col])
 			row[col] = v
+			t.removeIndexValue(col, old, wv)
+			t.addIndexValue(col, valueKey(v), wv)
+			t.updateFastRowLocked(wv, col, v)
 			return Result{Affected: 1}, nil
 		}
 		return Result{}, nil
 	}
 	n := 0
-	for _, row := range t.Rows {
+	for key, row := range t.Rows {
 		if wc != "" && fmt.Sprint(row[wc]) != wv {
 			continue
 		}
+		t.removeIndexValue(col, valueKey(row[col]), key)
+		t.addIndexValue(col, valueKey(v), key)
 		row[col] = v
+		t.updateFastRowLocked(key, col, v)
 		n++
 	}
 	return Result{Affected: n}, nil

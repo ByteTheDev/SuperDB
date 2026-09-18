@@ -18,6 +18,14 @@ import (
 func main() {
 	command := "menu"
 	args := os.Args[1:]
+	globalProduction := false
+	if len(args) > 0 && (args[0] == "-production" || args[0] == "--production") {
+		globalProduction = true
+		args = args[1:]
+		if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+			command = "server"
+		}
+	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command, args = args[0], args[1:]
 	}
@@ -28,7 +36,7 @@ func main() {
 		}
 	}
 	if command == "server" {
-		runServer(args)
+		runServer(args, globalProduction)
 		return
 	}
 	if command == "status" {
@@ -57,6 +65,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println("usage: superdb [server|status|backup|restore|recover|compact] [common flags]")
+	fmt.Println("       superdb --production [server flags]")
 }
 
 func menu() string {
@@ -94,11 +103,22 @@ func flags(name string, args []string) (*flag.FlagSet, *string, *string, *string
 	return fs, data, addr, mode
 }
 
-func runServer(args []string) {
+func runServer(args []string, globalProduction bool) {
 	fs, data, addr, mode := flags("server", args)
 	backupDir := fs.String("backup-dir", "", "directory for automatic snapshot backups (disabled when empty)")
 	backupInterval := fs.Duration("backup-interval", 1*time.Hour, "automatic backup interval")
+	production := fs.Bool("production", globalProduction, "use the production performance and durability profile")
+	profile := fs.String("profile", "standard", "server profile: standard or production")
 	fs.Parse(args)
+	if *profile != "standard" && *profile != "production" {
+		log.Fatal("profile must be standard or production")
+	}
+	if *profile == "production" {
+		*production = true
+	}
+	if *production && *mode == "memory" {
+		*mode = "wal"
+	}
 	if *backupDir != "" && *backupInterval <= 0 {
 		log.Fatal("backup-interval must be greater than zero")
 	}
@@ -112,6 +132,15 @@ func runServer(args []string) {
 		if e := server.ReplayWAL(*data, db); e != nil {
 			log.Fatal(e)
 		}
+	}
+	var walWriter *storage.WALWriter
+	if *mode == "wal" {
+		var e error
+		walWriter, e = storage.OpenWALWriter(storage.WALPath(*data))
+		if e != nil {
+			log.Fatal(e)
+		}
+		defer walWriter.Close()
 	}
 	if *backupDir != "" {
 		go runAutomaticBackups(*backupDir, *backupInterval, db)
@@ -128,7 +157,7 @@ func runServer(args []string) {
 			log.Print(e)
 			continue
 		}
-		go server.Handle(c, db, *mode, *data)
+		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter})
 	}
 }
 

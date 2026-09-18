@@ -11,7 +11,8 @@ import (
 const maxRequestSize = 16 << 20
 
 type request struct {
-	SQL string `json:"sql"`
+	SQL  string   `json:"sql,omitempty"`
+	SQLs []string `json:"sqls,omitempty"`
 }
 
 func readRequest(r *bufio.Reader) (request, error) {
@@ -30,6 +31,9 @@ func readRequest(r *bufio.Reader) (request, error) {
 	var q request
 	if err := json.Unmarshal(payload, &q); err != nil {
 		return request{}, err
+	}
+	if q.SQL == "" && len(q.SQLs) == 0 {
+		return request{}, errors.New("request must contain sql or sqls")
 	}
 	return q, nil
 }

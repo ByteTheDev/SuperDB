@@ -22,7 +22,11 @@ type Table struct {
 	Columns []Column
 	Rows    map[string]map[string]any
 	Order   []string
+	Indexes map[string]map[string]map[string]struct{}
 	mu      sync.RWMutex
+	fast    []fastRow
+	columns map[string]int
+	fastPos map[string]int
 }
 
 type Database struct {

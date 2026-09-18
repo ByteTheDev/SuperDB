@@ -20,8 +20,12 @@ func (d *Database) delete(s string) (Result, error) {
 	defer t.mu.Unlock()
 	if c != "" && c == t.primaryColumn() {
 		if _, ok := t.Rows[v]; ok {
+			for column := range t.Indexes {
+				t.removeIndexValue(column, valueKey(t.Rows[v][column]), v)
+			}
 			delete(t.Rows, v)
 			t.removeOrderKey(v)
+			t.removeFastRowLocked(v)
 			return Result{Affected: 1}, nil
 		}
 		return Result{}, nil
@@ -34,7 +38,11 @@ func (d *Database) delete(s string) (Result, error) {
 			continue
 		}
 		if c == "" || fmt.Sprint(row[c]) == v {
+			for column := range t.Indexes {
+				t.removeIndexValue(column, valueKey(row[column]), k)
+			}
 			delete(t.Rows, k)
+			t.removeFastRowLocked(k)
 			n++
 			continue
 		}

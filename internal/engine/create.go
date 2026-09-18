@@ -35,6 +35,6 @@ func (d *Database) create(s string) (Result, error) {
 	if _, ok := d.Tables[name]; ok {
 		return Result{}, errors.New("table exists")
 	}
-	d.Tables[name] = &Table{Name: name, Columns: cols, Rows: map[string]map[string]any{}}
+	d.Tables[name] = &Table{Name: name, Columns: cols, Rows: map[string]map[string]any{}, Indexes: make(map[string]map[string]map[string]struct{})}
 	return Result{Message: "table created"}, nil
 }
