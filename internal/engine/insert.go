@@ -6,20 +6,24 @@ import (
 )
 
 func (d *Database) insert(s string) (Result, error) {
-	u := strings.ToUpper(s)
-	vi := strings.Index(u, "VALUES")
+	vi := indexFold(s, "VALUES")
 	if vi < 0 {
 		return Result{}, errors.New("INSERT requires VALUES")
 	}
-	h := strings.Fields(s[:vi])
-	if len(h) < 3 {
+	// Only the short table-name token is scanned; the VALUES payload can be
+	// large and must not be split just to find the destination table.
+	tableName, ok := firstField(s[len("INSERT INTO"):vi])
+	if !ok {
 		return Result{}, errors.New("invalid INSERT")
 	}
-	t, e := d.table(h[2])
+	t, e := d.table(tableName)
 	if e != nil {
 		return Result{}, e
 	}
-	rows, err := parseInsertRows(strings.TrimSpace(s[vi+6:]), t.Columns)
+	// The VALUES parser is the hottest part of bulk INSERT. Keep the
+	// established parser available for parity tests and use the single-pass
+	// implementation on the production path.
+	rows, err := parseInsertRowsFast(s[vi+6:], t.Columns)
 	if err != nil {
 		return Result{}, err
 	}
@@ -52,6 +56,7 @@ func parseInsertRows(raw string, columns []Column) ([]insertRow, error) {
 		return nil, errors.New("INSERT requires VALUES")
 	}
 	rows := make([]insertRow, 0, len(groups))
+	seen := make(map[string]struct{}, len(groups))
 	for _, group := range groups {
 		vals := splitVals(group)
 		if len(vals) != len(columns) {
@@ -72,11 +77,10 @@ func parseInsertRows(raw string, columns []Column) ([]insertRow, error) {
 		if key == "" {
 			return nil, errors.New("primary key required")
 		}
-		for _, previous := range rows {
-			if previous.key == key {
-				return nil, errors.New("duplicate primary key")
-			}
+		if _, dup := seen[key]; dup {
+			return nil, errors.New("duplicate primary key")
 		}
+		seen[key] = struct{}{}
 		rows = append(rows, insertRow{key: key, row: row})
 	}
 	return rows, nil

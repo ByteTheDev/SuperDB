@@ -9,17 +9,16 @@ import (
 )
 
 func (d *Database) selectRows(s string) (Result, error) {
-	u := strings.ToUpper(s)
-	fi := strings.Index(u, "FROM")
+	fi := indexFold(s, "FROM")
 	if fi < 0 {
 		return Result{}, errors.New("SELECT requires FROM")
 	}
 	rest := strings.TrimSpace(s[fi+4:])
-	parts := strings.Fields(rest)
-	if len(parts) < 1 {
+	tableName, ok := firstField(rest)
+	if !ok {
 		return Result{}, errors.New("table required")
 	}
-	t, err := d.table(parts[0])
+	t, err := d.table(tableName)
 	if err != nil {
 		return Result{}, err
 	}
@@ -43,13 +42,10 @@ func (d *Database) selectRows(s string) (Result, error) {
 	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	compiled, validCondition := compileCondition(where, t.Columns)
-	if !validCondition {
-		return Result{}, errors.New("invalid WHERE expression")
-	}
-	if column, value, ok := simpleEquality(where); ok && column == t.primaryColumn() {
+	simpleColumn, simpleValue, simple := simpleEquality(where)
+	if simple && simpleColumn == t.primaryColumn() {
 		r := Result{Columns: names}
-		if rowIndex, fast := t.fastPos[value]; fast {
+		if rowIndex, fast := t.fastPos[simpleValue]; fast {
 			if rowIndex >= 0 && rowIndex < len(t.fast) && t.fast[rowIndex].key != "" {
 				r.Rows = [][]any{selectedFastValues(t.fast[rowIndex], names, t.columns)}
 			}
@@ -58,7 +54,7 @@ func (d *Database) selectRows(s string) (Result, error) {
 			}
 			return r, nil
 		}
-		if row, exists := t.Rows[value]; exists {
+		if row, exists := t.Rows[simpleValue]; exists {
 			r.Rows = append(r.Rows, selectedValues(row, names))
 		}
 		if limit == 0 {
@@ -66,14 +62,102 @@ func (d *Database) selectRows(s string) (Result, error) {
 		}
 		return r, nil
 	}
+	var compiled compiledCondition
+	var term fastTerm
+	fastTermOK := false
+	if len(t.fast) > 0 {
+		term, fastTermOK = simpleFastTerm(where, t)
+	}
+	if where != "" && !fastTermOK {
+		compiled, ok = compileCondition(where, t.Columns)
+		if !ok {
+			return Result{}, errors.New("invalid WHERE expression")
+		}
+	}
 	keys := make([]string, 0, len(t.Order))
 	indexed := false
-	if column, _, ok := simpleEquality(where); ok && t.Indexes[column] != nil {
+	if simple && t.Indexes[simpleColumn] != nil {
 		indexed = true
 	}
 	if len(t.fast) > 0 && orderColumn == "" && !indexed {
 		r := Result{Columns: names, Rows: make([][]any, 0, len(t.fast))}
 		if limit == 0 {
+			return r, nil
+		}
+		// Bare `column = value` predicates skip the compiled-condition
+		// machinery: the column index is resolved once and rows are
+		// compared with no per-row map lookups.
+		if fastTermOK {
+			emit := func(row fastRow) {
+				r.Rows = append(r.Rows, selectedFastValues(row, names, t.columns))
+			}
+			switch term.kind {
+			case fastInt:
+				exp := term.expected.(int64)
+				for _, row := range t.fast {
+					if row.key == "" {
+						continue
+					}
+					if v, isInt := row.values[term.index].(int64); isInt && v == exp {
+						emit(row)
+						if limit >= 0 && len(r.Rows) >= limit {
+							break
+						}
+					}
+				}
+			case fastString:
+				exp := term.expected.(string)
+				for _, row := range t.fast {
+					if row.key == "" {
+						continue
+					}
+					if v, isString := row.values[term.index].(string); isString && v == exp {
+						emit(row)
+						if limit >= 0 && len(r.Rows) >= limit {
+							break
+						}
+					}
+				}
+			case fastBool:
+				exp := term.expected.(bool)
+				for _, row := range t.fast {
+					if row.key == "" {
+						continue
+					}
+					if v, isBool := row.values[term.index].(bool); isBool && v == exp {
+						emit(row)
+						if limit >= 0 && len(r.Rows) >= limit {
+							break
+						}
+					}
+				}
+			case fastFloat:
+				exp := term.expected.(float64)
+				for _, row := range t.fast {
+					if row.key == "" {
+						continue
+					}
+					if v, isFloat := row.values[term.index].(float64); isFloat && v == exp {
+						emit(row)
+						if limit >= 0 && len(r.Rows) >= limit {
+							break
+						}
+					}
+				}
+			default:
+				for _, row := range t.fast {
+					if row.key == "" {
+						continue
+					}
+					if where != "" && !conditionValueEqual(row.values[term.index], term.expected) {
+						continue
+					}
+					emit(row)
+					if limit >= 0 && len(r.Rows) >= limit {
+						break
+					}
+				}
+			}
 			return r, nil
 		}
 		for _, row := range t.fast {
@@ -90,10 +174,26 @@ func (d *Database) selectRows(s string) (Result, error) {
 		}
 		return r, nil
 	}
-	if column, value, ok := simpleEquality(where); ok && t.Indexes[column] != nil {
-		for key := range t.Indexes[column][value] {
-			if row, exists := t.Rows[key]; exists && compiled.matchesMap(row) {
-				keys = append(keys, key)
+	if simple && t.Indexes[simpleColumn] != nil {
+		// Verify candidates against the fast array when available: no
+		// per-row map lookups, same single-term semantics via matchFastTerm.
+		if fastTermOK {
+			for key := range t.Indexes[simpleColumn][simpleValue] {
+				if fi, present := t.fastPos[key]; present && t.fast[fi].key != "" {
+					if matchFastTerm(t.fast[fi].values, term) {
+						keys = append(keys, key)
+					}
+					continue
+				}
+				if row, exists := t.Rows[key]; exists && conditionValueEqual(row[simpleColumn], term.expected) {
+					keys = append(keys, key)
+				}
+			}
+		} else {
+			for key := range t.Indexes[simpleColumn][simpleValue] {
+				if row, exists := t.Rows[key]; exists && compiled.matchesMap(row) {
+					keys = append(keys, key)
+				}
 			}
 		}
 	} else {
@@ -127,14 +227,24 @@ func (d *Database) selectRows(s string) (Result, error) {
 		keys = keys[:limit]
 	}
 	r := Result{Columns: names, Rows: make([][]any, 0, len(keys))}
-	for _, key := range keys {
-		r.Rows = append(r.Rows, selectedValues(t.Rows[key], names))
+	if len(t.fast) > 0 {
+		for _, key := range keys {
+			if fi, ok := t.fastPos[key]; ok && t.fast[fi].key != "" {
+				r.Rows = append(r.Rows, selectedFastValues(t.fast[fi], names, t.columns))
+				continue
+			}
+			r.Rows = append(r.Rows, selectedValues(t.Rows[key], names))
+		}
+	} else {
+		for _, key := range keys {
+			r.Rows = append(r.Rows, selectedValues(t.Rows[key], names))
+		}
 	}
 	return r, nil
 }
 
 func simpleEquality(expression string) (column, value string, ok bool) {
-	if expression == "" || strings.Contains(strings.ToUpper(expression), " AND ") || strings.Contains(strings.ToUpper(expression), " OR ") {
+	if expression == "" || indexFold(expression, " AND ") >= 0 || indexFold(expression, " OR ") >= 0 {
 		return "", "", false
 	}
 	parts := strings.SplitN(expression, "=", 2)
@@ -144,12 +254,98 @@ func simpleEquality(expression string) (column, value string, ok bool) {
 	return strings.ToLower(strings.TrimSpace(parts[0])), strings.Trim(strings.TrimSpace(parts[1]), "'"), true
 }
 
+// fastTerm is a pre-resolved bare `column = value` predicate: the column
+// index is looked up once per query instead of once per row, and kind
+// selects a type-specialized comparison. kindFastGeneric preserves the exact
+// conditionValueEqual semantics (including its fmt.Sprint fallback) for
+// predicates where the expected value's type does not match the column.
+type fastTerm struct {
+	index    int
+	expected any
+	kind     uint8
+}
+
+const (
+	kindFastGeneric uint8 = iota
+	fastInt
+	fastString
+	fastBool
+	fastFloat
+)
+
+// simpleFastTerm resolves a bare `column = value` predicate (no AND/OR) into
+// a fastTerm with the exact single-term semantics of compileCondition.
+// It reports false for anything else so callers fall back to the compiled
+// path, including invalid expressions (which must still raise errors there).
+func simpleFastTerm(expression string, t *Table) (fastTerm, bool) {
+	if expression == "" || indexFold(expression, " AND ") >= 0 || indexFold(expression, " OR ") >= 0 {
+		return fastTerm{}, false
+	}
+	parts := strings.SplitN(expression, "=", 2)
+	if len(parts) != 2 {
+		return fastTerm{}, false
+	}
+	column := strings.ToLower(strings.TrimSpace(parts[0]))
+	if column == "" {
+		return fastTerm{}, false
+	}
+	index, ok := t.columns[column]
+	if !ok || index < 0 || index >= len(t.Columns) {
+		return fastTerm{}, false
+	}
+	colType := t.Columns[index].Type
+	raw := strings.Trim(strings.TrimSpace(parts[1]), "'")
+	expected := any(raw)
+	if value, err := parseVal(parts[1], colType); err == nil {
+		expected = value
+	}
+	term := fastTerm{index: index, expected: expected}
+	switch colType {
+	case Int:
+		if _, isInt := expected.(int64); isInt {
+			term.kind = fastInt
+		}
+	case Text:
+		if _, isString := expected.(string); isString {
+			term.kind = fastString
+		}
+	case Bool:
+		if _, isBool := expected.(bool); isBool {
+			term.kind = fastBool
+		}
+	case Float:
+		if _, isFloat := expected.(float64); isFloat {
+			term.kind = fastFloat
+		}
+	}
+	return term, true
+}
+
+// matchFastTerm evaluates a resolved term against one fast row.
+func matchFastTerm(values []any, term fastTerm) bool {
+	switch term.kind {
+	case fastInt:
+		v, ok := values[term.index].(int64)
+		return ok && v == term.expected.(int64)
+	case fastString:
+		v, ok := values[term.index].(string)
+		return ok && v == term.expected.(string)
+	case fastBool:
+		v, ok := values[term.index].(bool)
+		return ok && v == term.expected.(bool)
+	case fastFloat:
+		v, ok := values[term.index].(float64)
+		return ok && v == term.expected.(float64)
+	default:
+		return conditionValueEqual(values[term.index], term.expected)
+	}
+}
+
 func parseSelectTail(rest string) (where, orderColumn string, descending bool, limit int, err error) {
 	limit = -1
-	upper := strings.ToUpper(rest)
-	whereStart := strings.Index(upper, "WHERE")
-	orderStart := strings.Index(upper, "ORDER BY")
-	limitStart := strings.Index(upper, "LIMIT")
+	whereStart := indexFold(rest, "WHERE")
+	orderStart := indexFold(rest, "ORDER BY")
+	limitStart := indexFold(rest, "LIMIT")
 	end := len(rest)
 	if orderStart >= 0 && orderStart < end {
 		end = orderStart
@@ -190,12 +386,16 @@ func parseSelectTail(rest string) (where, orderColumn string, descending bool, l
 }
 
 func isAggregate(expression string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(expression))
-	return strings.HasPrefix(upper, "COUNT(") || strings.HasPrefix(upper, "SUM(") || strings.HasPrefix(upper, "MIN(") || strings.HasPrefix(upper, "MAX(")
+	trimmed := strings.TrimSpace(expression)
+	return hasPrefixFold(trimmed, "COUNT(") || hasPrefixFold(trimmed, "SUM(") || hasPrefixFold(trimmed, "MIN(") || hasPrefixFold(trimmed, "MAX(")
 }
 
 func aggregateResult(t *Table, expression, where string) (Result, error) {
-	upper := strings.ToUpper(strings.TrimSpace(expression))
+	trimmed := strings.TrimSpace(expression)
+	isCountStar := foldEqualAt(trimmed, "COUNT(*)") && len(trimmed) == len("COUNT(*)")
+	isSum := hasPrefixFold(trimmed, "SUM(")
+	isMin := hasPrefixFold(trimmed, "MIN(")
+	isMax := hasPrefixFold(trimmed, "MAX(")
 	open, close := strings.Index(expression, "("), strings.LastIndex(expression, ")")
 	if open < 0 || close <= open {
 		return Result{}, errors.New("invalid aggregate")
@@ -215,12 +415,23 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 		if column != "*" && !hasColumn {
 			return Result{}, errors.New("column not found")
 		}
+		matchAll := where == ""
+		term, simple := simpleFastTerm(where, t)
 		for _, row := range t.fast {
-			if row.key == "" || (where != "" && !compiled.matchesFast(row.values, t.columns)) {
+			if row.key == "" {
 				continue
 			}
+			if !matchAll {
+				if simple {
+					if !matchFastTerm(row.values, term) {
+						continue
+					}
+				} else if !compiled.matchesFast(row.values, t.columns) {
+					continue
+				}
+			}
 			count++
-			if upper == "COUNT(*)" {
+			if isCountStar {
 				continue
 			}
 			value := row.values[columnIndex]
@@ -228,17 +439,17 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 				continue
 			}
 			switch {
-			case strings.HasPrefix(upper, "SUM("):
+			case isSum:
 				v, ok := numeric(value)
 				if !ok {
 					return Result{}, errors.New("SUM requires numeric values")
 				}
 				total += v
-			case strings.HasPrefix(upper, "MIN("):
+			case isMin:
 				if minValue == nil || fmt.Sprint(value) < fmt.Sprint(minValue) {
 					minValue = value
 				}
-			case strings.HasPrefix(upper, "MAX("):
+			case isMax:
 				if maxValue == nil || fmt.Sprint(value) > fmt.Sprint(maxValue) {
 					maxValue = value
 				}
@@ -251,7 +462,7 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 				continue
 			}
 			count++
-			if upper == "COUNT(*)" {
+			if isCountStar {
 				continue
 			}
 			value := row[column]
@@ -259,17 +470,17 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 				continue
 			}
 			switch {
-			case strings.HasPrefix(upper, "SUM("):
+			case isSum:
 				v, ok := numeric(value)
 				if !ok {
 					return Result{}, errors.New("SUM requires numeric values")
 				}
 				total += v
-			case strings.HasPrefix(upper, "MIN("):
+			case isMin:
 				if minValue == nil || fmt.Sprint(value) < fmt.Sprint(minValue) {
 					minValue = value
 				}
-			case strings.HasPrefix(upper, "MAX("):
+			case isMax:
 				if maxValue == nil || fmt.Sprint(value) > fmt.Sprint(maxValue) {
 					maxValue = value
 				}
@@ -278,13 +489,13 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 	}
 	var value any = count
 	switch {
-	case strings.HasPrefix(upper, "SUM("):
+	case isSum:
 		value = total
-	case strings.HasPrefix(upper, "MIN("):
+	case isMin:
 		value = minValue
-	case strings.HasPrefix(upper, "MAX("):
+	case isMax:
 		value = maxValue
-	case !strings.HasPrefix(upper, "COUNT("):
+	case !hasPrefixFold(trimmed, "COUNT("):
 		return Result{}, errors.New("unsupported aggregate")
 	}
 	return Result{Columns: []string{strings.ToLower(strings.TrimSpace(expression))}, Rows: [][]any{{value}}}, nil

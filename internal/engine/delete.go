@@ -2,16 +2,16 @@ package engine
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 )
 
 func (d *Database) delete(s string) (Result, error) {
-	f := strings.Fields(s)
-	if len(f) < 3 {
+	rest := strings.TrimSpace(s[len("DELETE FROM"):])
+	tableName, ok := firstField(rest)
+	if !ok {
 		return Result{}, errors.New("invalid DELETE")
 	}
-	t, e := d.table(f[2])
+	t, e := d.table(tableName)
 	if e != nil {
 		return Result{}, e
 	}
@@ -24,8 +24,12 @@ func (d *Database) delete(s string) (Result, error) {
 				t.removeIndexValue(column, valueKey(t.Rows[v][column]), v)
 			}
 			delete(t.Rows, v)
-			t.removeOrderKey(v)
+			// Leave the Order slot in place: scans already skip keys
+			// missing from Rows. Reaped by compaction once stale keys
+			// reach a quarter of Order, keeping deletes O(1).
+			t.dead++
 			t.removeFastRowLocked(v)
+			t.compactOrderLocked()
 			return Result{Affected: 1}, nil
 		}
 		return Result{}, nil
@@ -37,7 +41,7 @@ func (d *Database) delete(s string) (Result, error) {
 		if !ok {
 			continue
 		}
-		if c == "" || fmt.Sprint(row[c]) == v {
+		if c == "" || matchWhereValue(row[c], v) {
 			for column := range t.Indexes {
 				t.removeIndexValue(column, valueKey(row[column]), k)
 			}
@@ -49,14 +53,9 @@ func (d *Database) delete(s string) (Result, error) {
 		remaining = append(remaining, k)
 	}
 	t.Order = remaining
-	return Result{Affected: n}, nil
-}
-
-func (t *Table) removeOrderKey(key string) {
-	for i, k := range t.Order {
-		if k == key {
-			t.Order = append(t.Order[:i], t.Order[i+1:]...)
-			return
-		}
+	t.dead = 0
+	if len(t.fast) > 0 && t.fastDead*4 >= len(t.fast)+t.fastDead {
+		t.rebuildFastPathLocked()
 	}
+	return Result{Affected: n}, nil
 }

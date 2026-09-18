@@ -34,7 +34,10 @@ func encodeFrame(kind, frameVersion byte, payload []byte, compress bool) ([]byte
 	encoded := payload
 	if compress {
 		var compressed bytes.Buffer
-		zw := zlib.NewWriter(&compressed)
+		zw, err := zlib.NewWriterLevel(&compressed, zlib.BestSpeed)
+		if err != nil {
+			return nil, err
+		}
 		if _, err := zw.Write(payload); err != nil {
 			return nil, err
 		}

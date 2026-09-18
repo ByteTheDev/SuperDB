@@ -27,6 +27,13 @@ type Table struct {
 	fast    []fastRow
 	columns map[string]int
 	fastPos map[string]int
+	// dead counts stale keys left in Order by primary-key deletes and
+	// fastDead counts tombstoned entries in fast. Both are reaped by
+	// compaction once they reach a quarter of their slice. They are
+	// lock-guarded by mu and intentionally unexported so snapshots,
+	// clones, and the wire format are unchanged.
+	dead     int
+	fastDead int
 }
 
 type Database struct {

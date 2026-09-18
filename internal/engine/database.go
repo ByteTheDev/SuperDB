@@ -23,21 +23,22 @@ func (d *Database) ExecBatch(sqls []string) ([]Result, error) {
 
 func (d *Database) Exec(sql string) (Result, error) {
 	s := strings.TrimSpace(strings.TrimSuffix(sql, ";"))
-	upper := strings.ToUpper(s)
+	// Prefix dispatch without upper-casing the whole statement: VALUES
+	// payloads can be large and only the leading keyword matters here.
 	switch {
-	case strings.HasPrefix(upper, "CREATE TABLE"):
+	case hasPrefixFold(s, "CREATE TABLE"):
 		return d.create(s)
-	case strings.HasPrefix(upper, "CREATE INDEX"):
+	case hasPrefixFold(s, "CREATE INDEX"):
 		return d.createIndex(s)
-	case strings.HasPrefix(upper, "ALTER TABLE"):
+	case hasPrefixFold(s, "ALTER TABLE"):
 		return d.alterTable(s)
-	case strings.HasPrefix(upper, "INSERT INTO"):
+	case hasPrefixFold(s, "INSERT INTO"):
 		return d.insert(s)
-	case strings.HasPrefix(upper, "SELECT"):
+	case hasPrefixFold(s, "SELECT"):
 		return d.selectRows(s)
-	case strings.HasPrefix(upper, "UPDATE"):
+	case hasPrefixFold(s, "UPDATE"):
 		return d.update(s)
-	case strings.HasPrefix(upper, "DELETE FROM"):
+	case hasPrefixFold(s, "DELETE FROM"):
 		return d.delete(s)
 	default:
 		return Result{}, fmt.Errorf("unsupported SQL")
