@@ -89,3 +89,30 @@ func TestStoragePathsRemainStable(t *testing.T) {
 		t.Fatal("unexpected storage path")
 	}
 }
+
+func TestRecoverLatestRestoresNewestBackup(t *testing.T) {
+	backupDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	db := engine.New()
+	if _, err := db.Exec("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO users VALUES (1, 'Ada')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateBackup(backupDir, db); err != nil {
+		t.Fatal(err)
+	}
+	restored := engine.New()
+	path, err := RecoverLatest(backupDir, dataDir)
+	if err != nil || path == "" {
+		t.Fatalf("recover failed: path=%q err=%v", path, err)
+	}
+	if err := LoadSnapshot(dataDir, restored); err != nil {
+		t.Fatal(err)
+	}
+	result, err := restored.Exec("SELECT * FROM users WHERE id = 1")
+	if err != nil || len(result.Rows) != 1 || result.Rows[0][1] != "Ada" {
+		t.Fatalf("recovered database mismatch: result=%+v err=%v", result, err)
+	}
+}

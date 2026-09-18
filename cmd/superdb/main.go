@@ -1,25 +1,107 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"superdb/internal/engine"
 	"superdb/internal/server"
+	"superdb/internal/storage"
+	"time"
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "server" {
-		fmt.Println("usage: superdb server [--addr host:port] [--mode memory|wal|snapshot] [--data dir]")
+	command := "menu"
+	args := os.Args[1:]
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command, args = args[0], args[1:]
+	}
+	if command == "menu" {
+		command = menu()
+		if command == "" {
+			return
+		}
+	}
+	if command == "server" {
+		runServer(args)
 		return
 	}
-	fs := flag.NewFlagSet("server", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:7654", "listen address")
-	mode := fs.String("mode", "memory", "durability mode")
-	data := fs.String("data", "./SUPERDB", "data directory")
-	fs.Parse(os.Args[2:])
+	if command == "status" {
+		runStatus(args)
+		return
+	}
+	if command == "backup" {
+		runBackup(args)
+		return
+	}
+	if command == "restore" {
+		runRestore(args)
+		return
+	}
+	if command == "recover" {
+		runRecover(args)
+		return
+	}
+	if command == "compact" {
+		runCompact(args)
+		return
+	}
+	fmt.Printf("unknown command %q\n", command)
+	printUsage()
+}
+
+func printUsage() {
+	fmt.Println("usage: superdb [server|status|backup|restore|recover|compact] [common flags]")
+}
+
+func menu() string {
+	fmt.Println("SuperDB")
+	fmt.Println("1) Start server")
+	fmt.Println("2) Status")
+	fmt.Println("3) Backup")
+	fmt.Println("4) Restore")
+	fmt.Println("5) Compact")
+	fmt.Println("q) Quit")
+	fmt.Print("Choose an option: ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.TrimSpace(line) {
+	case "1":
+		return "server"
+	case "2":
+		return "status"
+	case "3":
+		return "backup"
+	case "4":
+		return "restore"
+	case "5":
+		return "compact"
+	default:
+		return ""
+	}
+}
+
+func flags(name string, args []string) (*flag.FlagSet, *string, *string, *string) {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	data := fs.String("data-dir", "./SUPERDB", "SUPERDB storage directory")
+	fs.StringVar(data, "data", "./SUPERDB", "alias for --data-dir")
+	addr := fs.String("addr", "127.0.0.1:7654", "server listen/connect address")
+	mode := fs.String("mode", "memory", "durability mode: memory, wal, or snapshot")
+	return fs, data, addr, mode
+}
+
+func runServer(args []string) {
+	fs, data, addr, mode := flags("server", args)
+	backupDir := fs.String("backup-dir", "", "directory for automatic snapshot backups (disabled when empty)")
+	backupInterval := fs.Duration("backup-interval", 1*time.Hour, "automatic backup interval")
+	fs.Parse(args)
+	if *backupDir != "" && *backupInterval <= 0 {
+		log.Fatal("backup-interval must be greater than zero")
+	}
 	db := engine.New()
 	if *mode == "wal" || *mode == "snapshot" {
 		if e := server.LoadSnapshot(*data, db); e != nil {
@@ -30,6 +112,9 @@ func main() {
 		if e := server.ReplayWAL(*data, db); e != nil {
 			log.Fatal(e)
 		}
+	}
+	if *backupDir != "" {
+		go runAutomaticBackups(*backupDir, *backupInterval, db)
 	}
 	log.Printf("SuperDB listening on %s mode=%s data=%s", *addr, *mode, *data)
 	ln, e := net.Listen("tcp", *addr)
@@ -45,4 +130,105 @@ func main() {
 		}
 		go server.Handle(c, db, *mode, *data)
 	}
+}
+
+func runAutomaticBackups(dir string, interval time.Duration, db *engine.Database) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if _, err := server.CreateBackup(dir, db); err != nil {
+			log.Printf("automatic backup failed: %v", err)
+		}
+	}
+}
+
+func runStatus(args []string) {
+	fs, data, addr, mode := flags("status", args)
+	fs.Parse(args)
+	fmt.Printf("SuperDB status\n  data: %s\n  address: %s\n  mode: %s\n", *data, *addr, *mode)
+	for _, name := range []string{storage.SnapshotPath(*data), storage.WALPath(*data)} {
+		info, err := os.Stat(name)
+		if os.IsNotExist(err) {
+			fmt.Printf("  %-20s missing\n", filepath.Base(name))
+			continue
+		}
+		if err != nil {
+			log.Printf("  %s: %v\n", name, err)
+			continue
+		}
+		fmt.Printf("  %-20s %d bytes\n", filepath.Base(name), info.Size())
+	}
+}
+
+func runBackup(args []string) {
+	fs, data, _, _ := flags("backup", args)
+	fs.Parse(args)
+	remaining := fs.Args()
+	destination := filepath.Join(*data, "backup")
+	if len(remaining) > 0 {
+		destination = remaining[0]
+	}
+	if err := os.MkdirAll(destination, 0755); err != nil {
+		log.Fatal(err)
+	}
+	for _, source := range []string{storage.SnapshotPath(*data), storage.WALPath(*data)} {
+		if err := copyFile(source, filepath.Join(destination, filepath.Base(source))); err != nil && !os.IsNotExist(err) {
+			log.Fatal(err)
+		}
+	}
+	fmt.Printf("Backup created at %s\n", destination)
+}
+
+func runRestore(args []string) {
+	fs, data, _, _ := flags("restore", args)
+	fs.Parse(args)
+	if len(fs.Args()) != 1 {
+		fmt.Println("usage: superdb restore <backup-dir> [--data-dir DIR]")
+		return
+	}
+	sourceDir := fs.Args()[0]
+	if err := os.MkdirAll(*data, 0755); err != nil {
+		log.Fatal(err)
+	}
+	for _, name := range []string{"snapshot.spdb", "wal.spdb"} {
+		if err := copyFile(filepath.Join(sourceDir, name), filepath.Join(*data, name)); err != nil && !os.IsNotExist(err) {
+			log.Fatal(err)
+		}
+	}
+	fmt.Printf("Restored backup into %s\n", *data)
+}
+
+func runRecover(args []string) {
+	fs, data, _, _ := flags("recover", args)
+	backupDir := fs.String("backup-dir", "./BACKUPS", "timestamped backup directory")
+	fs.Parse(args)
+	if len(fs.Args()) > 0 {
+		*backupDir = fs.Args()[0]
+	}
+	path, err := server.RecoverLatest(*backupDir, *data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Recovered %s into %s\n", path, *data)
+}
+
+func runCompact(args []string) {
+	fs, data, _, _ := flags("compact", args)
+	fs.Parse(args)
+	db := engine.New()
+	if err := server.LoadSnapshot(*data, db); err != nil {
+		log.Fatal(err)
+	}
+	if err := storage.WriteSnapshot(storage.SnapshotPath(*data), db); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Compacted snapshot at %s\n", storage.SnapshotPath(*data))
+}
+
+func copyFile(source, destination string) error {
+	b, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(destination, b, 0644)
 }
