@@ -148,6 +148,13 @@ func (s *RangeStore) assignLocked() map[string]uint64 {
 
 func (s *RangeStore) nextLocked() uint64 { return s.nextID }
 
+// nextRangeID returns the next allocatable range ID.
+func (s *RangeStore) nextRangeID() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nextID
+}
+
 // ReplaceBulk replaces the directory from a remote snapshot (join path).
 func (s *RangeStore) ReplaceBulk(ranges []Range) {
 	s.mu.Lock()
@@ -166,8 +173,14 @@ func (s *RangeStore) ReplaceBulk(ranges []Range) {
 	}
 }
 
-// restoreLocked replaces directory, assignment, and ID counter from a Raft
+// restore replaces directory, assignment, and ID counter from a Raft
 // snapshot image.
+func (s *RangeStore) restore(ranges []Range, assign map[string]uint64, nextID uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restoreLocked(ranges, assign, nextID)
+}
+
 func (s *RangeStore) restoreLocked(ranges []Range, assign map[string]uint64, nextID uint64) {
 	s.ranges = make(map[uint64]Range, len(ranges))
 	max := uint64(0)
@@ -215,7 +228,14 @@ func (s *RangeStore) SetRangeLeader(rangeID uint64, leader string) {
 	}
 }
 
-// applyOpLocked applies a committed RangeOp verbatim after fencing checks.
+// applyOp applies a committed RangeOp verbatim after fencing checks.
+// It takes the directory lock itself; callers must not hold it.
+func (s *RangeStore) applyOp(op *RangeOp) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.applyOpLocked(op)
+}
+
 func (s *RangeStore) applyOpLocked(op *RangeOp) error {
 	for id, gen := range op.BaseGenerations {
 		r, ok := s.ranges[id]

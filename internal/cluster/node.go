@@ -178,12 +178,15 @@ func (n *Node) Start(ctx context.Context) error {
 		return err
 	}
 	n.rn = rn
+	// Publish everything RPC handlers touch before serving: handlers run on
+	// connection goroutines the moment Serve starts.
+	n.router = NewRouter(n.ranges, n.members, n.identity.NodeID)
+	n.started = time.Now()
 	n.registerHandlers()
 
 	nctx, cancel := context.WithCancel(context.Background())
 	n.ctx = nctx
 	n.cancel = cancel
-	n.started = time.Now()
 
 	n.wg.Add(1)
 	go func() {
@@ -205,9 +208,6 @@ func (n *Node) Start(ctx context.Context) error {
 			return jerr
 		}
 	}
-	// Fresh state only: with Raft state present, Restore overwrites the
-	// directory from snapshots and the log replays the rest.
-	n.router = NewRouter(n.ranges, n.members, n.identity.NodeID)
 	// The initial range must itself be a committed log entry: only then do
 	// restarts and new joiners converge on the same directory through
 	// replay instead of in-memory defaults that diverge.

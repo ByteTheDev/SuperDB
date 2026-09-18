@@ -63,7 +63,7 @@ func (s *ReplicatedState) applyCommitted(idx uint64, e *Entry) *EntryResult {
 
 func (s *ReplicatedState) execLocked(e *Entry) *EntryResult {
 	if e.RangeID != 0 {
-		r, err := s.ranges.lookupLocked(e.RangeID)
+		r, err := s.ranges.ByID(e.RangeID)
 		if err != nil {
 			return &EntryResult{OK: false, Message: err.Error()}
 		}
@@ -106,7 +106,7 @@ func (s *ReplicatedState) rangeLocked(e *Entry) *EntryResult {
 	if e.Op == nil {
 		return &EntryResult{OK: false, Message: "range entry without op"}
 	}
-	if err := s.ranges.applyOpLocked(e.Op); err != nil {
+	if err := s.ranges.applyOp(e.Op); err != nil {
 		return &EntryResult{OK: false, Message: err.Error()}
 	}
 	return &EntryResult{OK: true}
@@ -131,9 +131,9 @@ func (s *ReplicatedState) snapshot() (raft.FSMSnapshot, error) {
 	img := replicatedSnapshot{
 		Index:  s.index,
 		DB:     raw,
-		Ranges: s.ranges.allLocked(),
-		Assign: s.ranges.assignLocked(),
-		NextID: s.ranges.nextLocked(),
+		Ranges: s.ranges.All(),
+		Assign: s.ranges.Assignment(),
+		NextID: s.ranges.nextRangeID(),
 	}
 	b, err := json.Marshal(img)
 	if err != nil {
@@ -162,7 +162,7 @@ func (s *ReplicatedState) restore(rc io.ReadCloser) error {
 	if err := s.db.ReplaceFrom(fresh); err != nil {
 		return err
 	}
-	s.ranges.restoreLocked(img.Ranges, img.Assign, img.NextID)
+	s.ranges.restore(img.Ranges, img.Assign, img.NextID)
 	s.index = img.Index
 	return nil
 }
