@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.0 — Hosted access and authentication (2026-09-20)
+
+SuperDB gains remote access and access control while local mode stays
+unchanged.
+
+Added:
+
+- Hosted `superdb serve` command speaking the `SDB1` framed protocol over
+  TCP/TLS, with env-based config (`SUPERDB_HOST`, `SUPERDB_PORT`, ...),
+  username/password auth, connection limits, `/health` and `/ready` probes,
+  and cluster routing. See `docs/hosted.md`.
+- `superdb://user:password@host:port/db` connection-string parsing
+  (`connstring.go`) and a first-party Go remote client (`client.go`).
+- Legacy server access key: `server --auth-key` (or `SUPERDB_AUTH_KEY`),
+  mirrored by the CLI. Requests without the correct key are rejected before
+  any SQL runs; unset means auth disabled (backward compatible).
+- Wire framing package (`internal/wire`), hosted server/session/metrics/
+  health packages (`internal/remote`), `Dockerfile`, and hosted deployment
+  docs.
+- Engine hardening: concurrency/transaction/mutation fixes, snapshot
+  improvements, and reliability tests.
+
 ## v0.2.0 — Raft cluster (2026-09-18)
 
 SuperDB grows from a single-process database into a real distributed cluster
