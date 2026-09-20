@@ -79,6 +79,16 @@ go run ./cmd/superdb recover --backup-dir ./BACKUPS --data-dir ./SUPERDB
 The server writes timestamped snapshots to the backup directory. `recover` validates
 the newest snapshot before replacing the active snapshot.
 
+### Hosted mode (remote access)
+
+```bash
+superdb serve --host 0.0.0.0 --port 7432 --data ./data
+```
+
+This speaks the `SDB1` framed protocol and accepts remote clients via
+`superdb://user:password@host:7432/main` (see [docs/hosted.md](docs/hosted.md)
+for TLS, auth, Docker, health checks, and the Go client). Local mode above is unchanged.
+
 For the production profile, use either form:
 
 ```bash
