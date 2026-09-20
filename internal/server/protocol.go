@@ -25,6 +25,12 @@ var bufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 type request struct {
 	SQL  string   `json:"sql,omitempty"`
 	SQLs []string `json:"sqls,omitempty"`
+	// Auth carries the client-supplied access key. It is compared against
+	// the server's configured key (see HandleOptions.AuthKey); empty when
+	// the client did not supply one. "auth_key" is accepted as an alias
+	// for compatibility with flag/env naming.
+	Auth    string `json:"auth,omitempty"`
+	AuthKey string `json:"auth_key,omitempty"`
 	// Atomic commits SQLs as one all-or-nothing unit. Honored in cluster
 	// mode (single Raft entry); in local mode the batch still stops at the
 	// first error but earlier statements are NOT rolled back.
@@ -71,6 +77,11 @@ func readRequest(r *bufio.Reader) (request, error) {
 	if pooled {
 		payloadPool.Put(payload[:0])
 	}
+	// Normalize the auth_key alias so callers only check q.Auth.
+	if q.Auth == "" && q.AuthKey != "" {
+		q.Auth = q.AuthKey
+	}
+	q.AuthKey = ""
 	if q.SQL == "" && len(q.SQLs) == 0 {
 		return request{}, errors.New("request must contain sql or sqls")
 	}

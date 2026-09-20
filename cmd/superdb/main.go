@@ -135,7 +135,11 @@ func runServer(args []string, globalProduction bool) {
 	advertise := fs.String("advertise", "", "advertised cluster address (defaults to --cluster-addr)")
 	join := fs.String("join", "", "comma-separated seed cluster address(es) to join")
 	region := fs.String("region", "", "region label for placement (optional)")
+	authKey := fs.String("auth-key", "", "require this access key on every client request (or SUPERDB_AUTH_KEY)")
 	fs.Parse(args)
+	if *authKey == "" {
+		*authKey = os.Getenv("SUPERDB_AUTH_KEY")
+	}
 	if *profile != "standard" && *profile != "production" {
 		log.Fatal("profile must be standard or production")
 	}
@@ -199,7 +203,11 @@ func runServer(args []string, globalProduction bool) {
 	if *backupDir != "" {
 		go runAutomaticBackups(*backupDir, *backupInterval, db)
 	}
-	log.Printf("SuperDB listening on %s mode=%s data=%s", *addr, *mode, *data)
+	if *authKey != "" {
+		log.Printf("SuperDB listening on %s mode=%s data=%s auth=enabled", *addr, *mode, *data)
+	} else {
+		log.Printf("SuperDB listening on %s mode=%s data=%s auth=disabled", *addr, *mode, *data)
+	}
 	ln, e := net.Listen("tcp", *addr)
 	if e != nil {
 		log.Fatal(e)
@@ -211,7 +219,7 @@ func runServer(args []string, globalProduction bool) {
 			log.Print(e)
 			continue
 		}
-		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter, Cluster: clusterExec})
+		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter, Cluster: clusterExec, AuthKey: *authKey})
 	}
 }
 

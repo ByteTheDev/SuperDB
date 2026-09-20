@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"net"
 	"strings"
 	"time"
@@ -18,6 +19,10 @@ func Handle(c net.Conn, db *engine.Database, mode, data string) {
 type HandleOptions struct {
 	Production bool
 	WALWriter  *storage.WALWriter
+	// AuthKey, when non-empty, requires every request to carry a matching
+	// "auth" (or "auth_key") field. Mismatches are rejected before any
+	// SQL executes. Empty disables authentication (backward compatible).
+	AuthKey string
 	// Cluster, when set, routes statements through Raft quorum commits.
 	// Multi-statement session transactions are rejected in this mode;
 	// use atomic batches instead.
@@ -51,6 +56,13 @@ func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, optio
 		q, err := readRequest(r)
 		if err != nil {
 			return
+		}
+		if !checkAuth(q.Auth, options.AuthKey) {
+			out := map[string]string{"error": "unauthorized: invalid or missing auth key"}
+			if err := writeResponse(w, out); err != nil {
+				return
+			}
+			continue
 		}
 		out := executeRequest(q, s, mode, data)
 		if err := writeResponse(w, out); err != nil {
@@ -183,6 +195,16 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		}
 	}
 	return res
+}
+
+// checkAuth reports whether the supplied key satisfies the required key.
+// Empty required disables authentication. Comparison is constant-time to
+// avoid leaking the key via timing.
+func checkAuth(supplied, required string) bool {
+	if required == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(supplied), []byte(required)) == 1
 }
 
 // isWriteSQL mirrors engine.Database.Exec's read classification: only

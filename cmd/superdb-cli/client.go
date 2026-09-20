@@ -31,7 +31,7 @@ func collectQueries(args []string) ([]string, error) {
 	return queries, nil
 }
 
-func runClient(addr string, queries []string) error {
+func runClient(addr, authKey string, queries []string) error {
 	if len(queries) == 0 {
 		return nil
 	}
@@ -51,13 +51,17 @@ func runClient(addr string, queries []string) error {
 	// stay byte-for-byte compatible. Multiple queries go out as one
 	// {"sqls": [...]} batch: 1 RTT instead of N, single server persist.
 	if len(queries) == 1 {
-		return roundTripSingle(c, queries[0])
+		return roundTripSingle(c, authKey, queries[0])
 	}
-	return roundTripBatch(c, queries)
+	return roundTripBatch(c, authKey, queries)
 }
 
-func roundTripSingle(c net.Conn, sql string) error {
-	payload, err := json.Marshal(map[string]string{"sql": sql})
+func roundTripSingle(c net.Conn, authKey, sql string) error {
+	msg := map[string]string{"sql": sql}
+	if authKey != "" {
+		msg["auth"] = authKey
+	}
+	payload, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
@@ -89,8 +93,12 @@ func roundTripSingle(c net.Conn, sql string) error {
 	return nil
 }
 
-func roundTripBatch(c net.Conn, queries []string) error {
-	payload, err := json.Marshal(map[string]any{"sqls": queries})
+func roundTripBatch(c net.Conn, authKey string, queries []string) error {
+	msg := map[string]any{"sqls": queries}
+	if authKey != "" {
+		msg["auth"] = authKey
+	}
+	payload, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}

@@ -51,6 +51,18 @@ func parseRequestFast(payload []byte) (q request, ok bool) {
 				return request{}, false
 			}
 			out.SQLs = list
+		case "auth":
+			s, sOK := p.string()
+			if !sOK {
+				return request{}, false
+			}
+			out.Auth = s
+		case "auth_key":
+			s, sOK := p.string()
+			if !sOK {
+				return request{}, false
+			}
+			out.AuthKey = s
 		case "atomic":
 			v, vOK := p.literal()
 			if !vOK {

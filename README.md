@@ -100,6 +100,12 @@ Production defaults to WAL durability, enables TCP keep-alive, and uses larger
 socket buffers. Use `--profile standard` or omit the flag for the normal profile;
 explicit `--mode` settings still override the production WAL default.
 
+To require an access key on every client request, start the server with
+`--auth-key <key>` (or set `SUPERDB_AUTH_KEY`) and pass the same key to the
+client with `--auth-key` (or `SUPERDB_AUTH_KEY`). Without the correct key the
+server returns an `unauthorized` error and runs no SQL. When no key is
+configured, authentication is disabled for backward compatibility.
+
 ### Developer commands
 
 Run `go run ./cmd/superdb` with no command to open the interactive menu. Every menu action is also available directly:
