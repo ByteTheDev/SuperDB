@@ -45,6 +45,16 @@ internal/cluster/routing.go      Decentralized table/key -> range/node routing
 internal/cluster/replication.go  RaftReplicator/WriteConcern (quorum-enforced)
 internal/cluster/stats.go        Atomic observability counters
 internal/cluster/errors.go       Structured cluster errors
+internal/wire/wire.go            SDB1 framed protocol (magic/version/type/reqID/len + JSON)
+internal/remote/config.go        Hosted server config, env vars, constant-time auth
+internal/remote/metrics.go       Atomic server observability counters
+internal/remote/server.go        Hosted TCP/TLS server, graceful shutdown, cluster routing
+internal/remote/session.go       Per-connection session/tx over existing engine APIs
+internal/remote/health.go        HTTP /health and /ready probes (no secrets)
+connstring.go                    superdb:// URL parsing (root superdb package)
+client.go                        First-party Go remote client (root superdb package)
+errors.go                        Structured server errors (root superdb package)
+docs/hosted.md                   Hosted deployment, protocol, TLS, Docker guide
 internal/storage/format.go       SUPERDB1 encoding/decoding and zlib
 internal/storage/snapshot.go     Snapshot read/write
 internal/storage/wal.go          WAL append/replay/writer

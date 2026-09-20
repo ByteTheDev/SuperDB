@@ -9,12 +9,15 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"superdb/internal/engine"
+	"superdb/internal/remote"
 	"superdb/internal/server"
 	"superdb/internal/storage"
 	"superdb/internal/updater"
+	"syscall"
 	"time"
 )
 
@@ -48,6 +51,10 @@ func main() {
 		runServer(args, globalProduction)
 		return
 	}
+	if command == "serve" {
+		runServe(args)
+		return
+	}
 	if command == "status" {
 		runStatus(args)
 		return
@@ -77,8 +84,9 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println("usage: superdb [server|status|backup|restore|recover|compact|update] [common flags]")
+	fmt.Println("usage: superdb [server|serve|status|backup|restore|recover|compact|update] [common flags]")
 	fmt.Println("       superdb --production [server flags]")
+	fmt.Println("       superdb serve --host 0.0.0.0 --port 7432 --data ./data")
 }
 
 func menu() string {
@@ -205,6 +213,81 @@ func runServer(args []string, globalProduction bool) {
 		}
 		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter, Cluster: clusterExec})
 	}
+}
+
+// runServe starts the hosted SDB1 network server:
+//
+//	superdb serve --host 0.0.0.0 --port 7432 --data ./data
+//
+// Configuration comes from flags with environment fallback (see
+// remote.LoadConfig): SUPERDB_HOST, SUPERDB_PORT/PORT, SUPERDB_DATA_DIR,
+// SUPERDB_USERNAME, SUPERDB_PASSWORD, SUPERDB_TLS_CERT, SUPERDB_TLS_KEY,
+// SUPERDB_MAX_CONNECTIONS, SUPERDB_HEALTH_ADDR. The hostname/port are never
+// hardcoded, so the server works behind TCP proxies, Docker, VMs, and
+// custom domains.
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	host := fs.String("host", "", "interface to listen on (SUPERDB_HOST)")
+	port := fs.Int("port", 0, "port to listen on (SUPERDB_PORT or PORT, default 7432)")
+	data := fs.String("data", "", "storage directory (SUPERDB_DATA_DIR, default ./data)")
+	fs.StringVar(data, "data-dir", "", "alias for --data")
+	mode := fs.String("mode", "", "durability: memory|wal|snapshot (default wal)")
+	username := fs.String("username", "", "auth username (SUPERDB_USERNAME)")
+	password := fs.String("password", "", "auth password (SUPERDB_PASSWORD)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate file (SUPERDB_TLS_CERT)")
+	tlsKey := fs.String("tls-key", "", "TLS key file (SUPERDB_TLS_KEY)")
+	maxConns := fs.Int("max-connections", 0, "max concurrent clients (SUPERDB_MAX_CONNECTIONS)")
+	healthAddr := fs.String("health-addr", "", "HTTP health listen addr, e.g. :8080 (SUPERDB_HEALTH_ADDR)")
+	clusterAddr := fs.String("cluster-addr", "", "internal cluster listen address (empty disables cluster mode)")
+	advertise := fs.String("advertise", "", "advertised cluster address (defaults to --cluster-addr)")
+	join := fs.String("join", "", "comma-separated seed cluster address(es) to join")
+	region := fs.String("region", "", "region label for placement (optional)")
+	fs.Parse(args)
+	cfg := remote.LoadConfig(remote.Config{
+		Host: *host, Port: *port, DataDir: *data, Mode: *mode,
+		Username: *username, Password: *password,
+		TLSCertFile: *tlsCert, TLSKeyFile: *tlsKey,
+		MaxConnections: *maxConns, HealthAddr: *healthAddr,
+		ClusterAddr: *clusterAddr, AdvertiseAddr: *advertise, Region: *region,
+	})
+	if *join != "" {
+		for _, s := range strings.Split(*join, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				cfg.JoinAddrs = append(cfg.JoinAddrs, s)
+			}
+		}
+	}
+	if cfg.DataDir == "" {
+		cfg.DataDir = "./data"
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = "wal"
+	}
+	// Durability wiring (snapshot load + WAL replay + WAL writer) is owned
+	// by the remote server itself so restarts recover the same state.
+	db := engine.New()
+	var clusterExec server.ClusterExec
+	if cfg.ClusterAddr != "" {
+		adv := cfg.AdvertiseAddr
+		if adv == "" {
+			adv = cfg.ClusterAddr
+		}
+		node, err := server.StartClusterNode(server.ClusterConfig{
+			DataDir: cfg.DataDir, ListenAddr: cfg.ClusterAddr, AdvertiseAddr: adv, JoinAddrs: cfg.JoinAddrs, Region: cfg.Region, DB: db,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer node.Shutdown()
+		clusterExec = node
+	}
+	srv := remote.New(db, cfg, clusterExec)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := srv.Serve(ctx); err != nil {
+		log.Print(err)
+	}
+	srv.Shutdown()
 }
 
 func runAutomaticBackups(dir string, interval time.Duration, db *engine.Database) {
