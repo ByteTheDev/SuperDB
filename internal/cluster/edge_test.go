@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,6 +90,42 @@ func TestDoubleRestart(t *testing.T) {
 			t.Fatalf("data lost on restart %d: %+v err=%v", i, res, err)
 		}
 		r.Shutdown()
+	}
+}
+
+// Startup must expose all committed rows, including logs after a snapshot.
+func TestRestartWaitsForCommittedRows(t *testing.T) {
+	for _, withSnapshot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("snapshot=%t", withSnapshot), func(t *testing.T) {
+			dir := t.TempDir()
+			n := startNode(t, testConfig(dir, freeAddr(t)))
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := n.Exec(ctx, "CREATE TABLE replay (id INT PRIMARY KEY)"); err != nil {
+				t.Fatal(err)
+			}
+			if withSnapshot {
+				if err := n.rn.r.Snapshot().Error(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const rows = 64
+			for i := 0; i < rows; i++ {
+				if _, err := n.Exec(ctx, fmt.Sprintf("INSERT INTO replay VALUES (%d)", i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantIndex := n.rstate.AppliedIndex()
+			n.Kill()
+			restarted := startNode(t, testConfig(dir, freeAddr(t)))
+			if got := restarted.rstate.AppliedIndex(); got < wantIndex {
+				t.Errorf("Start returned before replay completed: applied=%d want >=%d", got, wantIndex)
+			}
+			result, err := restarted.DB().Exec("SELECT COUNT(*) FROM replay")
+			if err != nil || len(result.Rows) != 1 || result.Rows[0][0] != rows {
+				t.Fatalf("committed rows unavailable after Start: %+v err=%v", result, err)
+			}
+		})
 	}
 }
 

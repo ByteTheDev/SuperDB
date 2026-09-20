@@ -9,7 +9,7 @@ import (
 )
 
 func (d *Database) selectRows(s string) (Result, error) {
-	fi := indexFold(s, "FROM")
+	fi := indexKeyword(s, "FROM")
 	if fi < 0 {
 		return Result{}, errors.New("SELECT requires FROM")
 	}
@@ -68,7 +68,7 @@ func (d *Database) selectRows(s string) (Result, error) {
 	if len(t.fast) > 0 {
 		term, fastTermOK = simpleFastTerm(where, t)
 	}
-	if where != "" && !fastTermOK {
+	if where != "" && (!fastTermOK || orderColumn != "") {
 		compiled, ok = compileCondition(where, t.Columns)
 		if !ok {
 			return Result{}, errors.New("invalid WHERE expression")
@@ -211,19 +211,10 @@ func (d *Database) selectRows(s string) (Result, error) {
 	if orderColumn != "" {
 		sort.SliceStable(keys, func(i, j int) bool {
 			leftValue, rightValue := t.Rows[keys[i]][orderColumn], t.Rows[keys[j]][orderColumn]
-			left, right := fmt.Sprint(leftValue), fmt.Sprint(rightValue)
-			if leftNumber, leftOK := numeric(leftValue); leftOK {
-				if rightNumber, rightOK := numeric(rightValue); rightOK {
-					if descending {
-						return leftNumber > rightNumber
-					}
-					return leftNumber < rightNumber
-				}
-			}
 			if descending {
-				return left > right
+				return valueLess(rightValue, leftValue)
 			}
-			return left < right
+			return valueLess(leftValue, rightValue)
 		})
 	}
 	if limit >= 0 && len(keys) > limit {
@@ -346,9 +337,13 @@ func matchFastTerm(values []any, term fastTerm) bool {
 
 func parseSelectTail(rest string) (where, orderColumn string, descending bool, limit int, err error) {
 	limit = -1
-	whereStart := indexFold(rest, "WHERE")
-	orderStart := indexFold(rest, "ORDER BY")
-	limitStart := indexFold(rest, "LIMIT")
+	whereStart := indexKeyword(rest, "WHERE")
+	orderStart := indexKeyword(rest, "ORDER BY")
+	limitStart := indexKeyword(rest, "LIMIT")
+	if whereStart >= 0 && (orderStart >= 0 && orderStart < whereStart || limitStart >= 0 && limitStart < whereStart) ||
+		orderStart >= 0 && limitStart >= 0 && limitStart < orderStart {
+		return "", "", false, -1, errors.New("invalid SELECT clause order")
+	}
 	end := len(rest)
 	if orderStart >= 0 && orderStart < end {
 		end = orderStart
@@ -358,6 +353,9 @@ func parseSelectTail(rest string) (where, orderColumn string, descending bool, l
 	}
 	if whereStart >= 0 {
 		where = strings.TrimSpace(rest[whereStart+5 : end])
+		if where == "" {
+			return "", "", false, -1, errors.New("invalid WHERE expression")
+		}
 	}
 	if orderStart >= 0 {
 		orderEnd := len(rest)
@@ -367,6 +365,9 @@ func parseSelectTail(rest string) (where, orderColumn string, descending bool, l
 		order := strings.Fields(strings.TrimSpace(rest[orderStart+8 : orderEnd]))
 		if len(order) == 0 {
 			return "", "", false, -1, errors.New("ORDER BY requires a column")
+		}
+		if len(order) > 2 {
+			return "", "", false, -1, errors.New("invalid ORDER BY expression")
 		}
 		orderColumn = strings.ToLower(order[0])
 		if len(order) > 1 {
@@ -395,7 +396,6 @@ func isAggregate(expression string) bool {
 
 func aggregateResult(t *Table, expression, where string) (Result, error) {
 	trimmed := strings.TrimSpace(expression)
-	isCountStar := foldEqualAt(trimmed, "COUNT(*)") && len(trimmed) == len("COUNT(*)")
 	isSum := hasPrefixFold(trimmed, "SUM(")
 	isMin := hasPrefixFold(trimmed, "MIN(")
 	isMax := hasPrefixFold(trimmed, "MAX(")
@@ -404,6 +404,7 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 		return Result{}, errors.New("invalid aggregate")
 	}
 	column := strings.ToLower(strings.TrimSpace(expression[open+1 : close]))
+	isCountStar := hasPrefixFold(trimmed, "COUNT(") && column == "*"
 	compiled, validCondition := compileCondition(where, t.Columns)
 	if !validCondition {
 		return Result{}, errors.New("invalid WHERE expression")
@@ -431,14 +432,15 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 					continue
 				}
 			}
-			count++
 			if isCountStar {
+				count++
 				continue
 			}
 			value := row.values[columnIndex]
 			if value == nil {
 				continue
 			}
+			count++
 			switch {
 			case isSum:
 				v, ok := numeric(value)
@@ -447,11 +449,11 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 				}
 				total += v
 			case isMin:
-				if minValue == nil || fmt.Sprint(value) < fmt.Sprint(minValue) {
+				if minValue == nil || valueLess(value, minValue) {
 					minValue = value
 				}
 			case isMax:
-				if maxValue == nil || fmt.Sprint(value) > fmt.Sprint(maxValue) {
+				if maxValue == nil || valueLess(maxValue, value) {
 					maxValue = value
 				}
 			}
@@ -465,14 +467,15 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 			if where != "" && !compiled.matchesMap(row) {
 				continue
 			}
-			count++
 			if isCountStar {
+				count++
 				continue
 			}
 			value := row[column]
 			if value == nil {
 				continue
 			}
+			count++
 			switch {
 			case isSum:
 				v, ok := numeric(value)
@@ -481,11 +484,11 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 				}
 				total += v
 			case isMin:
-				if minValue == nil || fmt.Sprint(value) < fmt.Sprint(minValue) {
+				if minValue == nil || valueLess(value, minValue) {
 					minValue = value
 				}
 			case isMax:
-				if maxValue == nil || fmt.Sprint(value) > fmt.Sprint(maxValue) {
+				if maxValue == nil || valueLess(maxValue, value) {
 					maxValue = value
 				}
 			}
@@ -503,6 +506,22 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 		return Result{}, errors.New("unsupported aggregate")
 	}
 	return Result{Columns: []string{strings.ToLower(strings.TrimSpace(expression))}, Rows: [][]any{{value}}}, nil
+}
+
+// valueLess shares ordering between ORDER BY and MIN/MAX. Compare integers
+// directly so adjacent int64 values above 2^53 never collapse to one float.
+func valueLess(left, right any) bool {
+	if l, ok := left.(int64); ok {
+		if r, ok := right.(int64); ok {
+			return l < r
+		}
+	}
+	if l, ok := numeric(left); ok {
+		if r, ok := numeric(right); ok {
+			return l < r
+		}
+	}
+	return fmt.Sprint(left) < fmt.Sprint(right)
 }
 
 func numeric(value any) (float64, bool) {

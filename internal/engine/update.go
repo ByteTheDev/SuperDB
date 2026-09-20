@@ -6,7 +6,7 @@ import (
 )
 
 func (d *Database) update(s string) (Result, error) {
-	si := indexFold(s, "SET")
+	si := indexKeyword(s, "SET")
 	if si < 0 {
 		return Result{}, errors.New("UPDATE requires SET")
 	}
@@ -19,7 +19,7 @@ func (d *Database) update(s string) (Result, error) {
 		return Result{}, e
 	}
 	tail := s[si+3:]
-	wi := indexFold(tail, "WHERE")
+	wi := indexKeyword(tail, "WHERE")
 	assign := strings.TrimSpace(tail)
 	if wi >= 0 {
 		assign = strings.TrimSpace(tail[:wi])

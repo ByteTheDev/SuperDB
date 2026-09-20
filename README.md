@@ -144,3 +144,14 @@ See [docs/cluster.md](docs/cluster.md) for the honest implemented-vs-planned spl
 `CREATE TABLE`, `INSERT`, `SELECT`, `UPDATE`, `DELETE`, `BEGIN`, `COMMIT`, and `ROLLBACK`.
 
 The v1 query engine intentionally focuses on primary-key equality and simple literal filters.
+
+SELECT clauses follow `WHERE`, `ORDER BY`, then `LIMIT`; empty predicates and
+misordered clauses return errors. Clause keywords inside text literals or longer
+identifiers are not treated as SQL syntax. Numeric `MIN`/`MAX` and integer sorting
+use numeric order without losing integer precision. `COUNT(column)` excludes
+NULL values, while `COUNT(*)` includes every matching row. Ordered filters work
+with both small tables and the large-table fast path.
+
+On cluster leader startup, SuperDB waits for committed log replay before
+returning, including entries written after the restored snapshot. Follower local
+reads retain their existing relaxed consistency; use consistent reads when needed.

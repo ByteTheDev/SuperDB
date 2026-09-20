@@ -71,7 +71,7 @@ func filter(s string) (string, string) {
 // (missing "=", empty column/value such as "WHERE id > 1" or bare "WHERE")
 // returns an invalid-WHERE error so callers never fall back to match-all.
 func parseMutationWhere(s string) (column, value string, hasWhere bool, err error) {
-	i := indexFold(s, "WHERE")
+	i := indexKeyword(s, "WHERE")
 	if i < 0 {
 		return "", "", false, nil
 	}
@@ -80,7 +80,7 @@ func parseMutationWhere(s string) (column, value string, hasWhere bool, err erro
 		return "", "", true, errors.New("invalid WHERE expression")
 	}
 	// Only single-term equality is supported for mutations.
-	if indexFold(rest, " AND ") >= 0 || indexFold(rest, " OR ") >= 0 {
+	if indexKeyword(rest, "AND") >= 0 || indexKeyword(rest, "OR") >= 0 {
 		return "", "", true, errors.New("invalid WHERE expression")
 	}
 	p := strings.SplitN(rest, "=", 2)

@@ -6,7 +6,7 @@ import (
 )
 
 func (d *Database) insert(s string) (Result, error) {
-	vi := indexFold(s, "VALUES")
+	vi := indexKeyword(s, "VALUES")
 	if vi < 0 {
 		return Result{}, errors.New("INSERT requires VALUES")
 	}

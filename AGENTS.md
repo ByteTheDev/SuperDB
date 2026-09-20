@@ -172,6 +172,8 @@ Important behavior:
 - Primary keys use direct lookup fast paths.
 - Secondary indexes must stay correct after insert, update, delete, clone, and replace.
 - WHERE, ordering, limits, aggregates, and logical predicates are only the implemented subset of SQL.
+- SELECT clause order is WHERE, ORDER BY, LIMIT; reject empty WHERE clauses and misordered clauses without panicking. Keyword searches must skip quoted literals and identifier substrings.
+- Ordered predicates must agree across small-table, large-table, and indexed paths. MIN/MAX compare numeric values numerically; integer sorting preserves int64 precision. COUNT(column) excludes NULL; COUNT(*) counts all matching rows.
 - Transactions are session-local clones until COMMIT.
 - WAL records mutating SQL, not reads.
 - Batches execute and return results in order.
@@ -233,6 +235,11 @@ Automatic backups use `--backup-dir` and `--backup-interval`. Recovery validates
 ## Concurrency
 
 The database and tables use locks. The server uses one goroutine per TCP connection. Transactions clone and replace database state. Do not hold database locks while doing slow network or filesystem work. Run race tests for locking, transactions, indexes, and server changes.
+
+Cluster leaders finish a Raft barrier before Start returns so committed rows are
+available after snapshot/log recovery. Genesis creation also waits for replay
+before deciding whether an initial range is missing. Follower local reads remain
+relaxed; callers requiring linearizable reads must use the consistent-read API.
 
 ## Performance
 
