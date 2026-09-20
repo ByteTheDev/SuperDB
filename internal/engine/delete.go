@@ -15,7 +15,11 @@ func (d *Database) delete(s string) (Result, error) {
 	if e != nil {
 		return Result{}, e
 	}
-	c, v := filter(s)
+	c, v, hasWhere, err := parseMutationWhere(s)
+	if err != nil {
+		return Result{}, err
+	}
+	_ = hasWhere
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if c != "" && c == t.primaryColumn() {
@@ -24,12 +28,8 @@ func (d *Database) delete(s string) (Result, error) {
 				t.removeIndexValue(column, valueKey(t.Rows[v][column]), v)
 			}
 			delete(t.Rows, v)
-			// Leave the Order slot in place: scans already skip keys
-			// missing from Rows. Reaped by compaction once stale keys
-			// reach a quarter of Order, keeping deletes O(1).
-			t.dead++
+			t.removeFromOrderLocked(v)
 			t.removeFastRowLocked(v)
-			t.compactOrderLocked()
 			return Result{Affected: 1}, nil
 		}
 		return Result{}, nil

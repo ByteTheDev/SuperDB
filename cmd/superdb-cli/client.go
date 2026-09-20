@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 )
 
 func collectQueries(args []string) ([]string, error) {
@@ -16,6 +17,9 @@ func collectQueries(args []string) ([]string, error) {
 	}
 	queries := []string{}
 	in := bufio.NewScanner(os.Stdin)
+	// The server accepts requests up to 16 MiB; allow single-line
+	// statements up to that size instead of the 64 KiB scanner default.
+	in.Buffer(make([]byte, 64<<10), 16<<20)
 	for in.Scan() {
 		if sql := strings.TrimSpace(in.Text()); sql != "" {
 			queries = append(queries, sql)
@@ -31,11 +35,13 @@ func runClient(addr string, queries []string) error {
 	if len(queries) == 0 {
 		return nil
 	}
-	c, err := net.Dial("tcp", addr)
+	c, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
+	// Bound the whole operation so a hung server cannot hang the CLI forever.
+	_ = c.SetDeadline(time.Now().Add(2 * time.Minute))
 	if tcp, ok := c.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
 		_ = tcp.SetReadBuffer(256 << 10)

@@ -1,6 +1,9 @@
 package engine
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 type Type string
 
@@ -37,8 +40,12 @@ type Table struct {
 }
 
 type Database struct {
-	Tables map[string]*Table
-	mu     sync.RWMutex
+	Tables       map[string]*Table
+	mu           sync.RWMutex
+	gate         sync.RWMutex
+	commitMu     sync.Mutex
+	revision     atomic.Uint64
+	baseRevision uint64
 }
 
 type Result struct {

@@ -23,7 +23,10 @@ func (t *Table) rebuildFastPathLocked() {
 	t.fastPos = make(map[string]int, len(t.Order))
 	t.fastDead = 0
 	for _, key := range t.Order {
-		row := t.Rows[key]
+		row, exists := t.Rows[key]
+		if !exists {
+			continue
+		}
 		values := make([]any, len(t.Columns))
 		for i, column := range t.Columns {
 			values[i] = row[column.Name]
@@ -68,6 +71,20 @@ func (t *Table) removeFastRowLocked(key string) {
 	}
 }
 
+// removeFromOrderLocked removes key from Order while preserving scan order.
+// Primary-key deletes use this so a later reinsert of the same key cannot
+// leave a duplicate Order entry that would double-count the row.
+func (t *Table) removeFromOrderLocked(key string) {
+	for i, k := range t.Order {
+		if k == key {
+			copy(t.Order[i:], t.Order[i+1:])
+			t.Order[len(t.Order)-1] = ""
+			t.Order = t.Order[:len(t.Order)-1]
+			break
+		}
+	}
+}
+
 // compactOrderLocked reaps stale Order keys left behind by primary-key
 // deletes and rebuilds the fast path when tombstones accumulate. Scans
 // already skip missing keys, so compaction only bounds memory and keeps
@@ -107,6 +124,23 @@ func (t *Table) updateFastRowLocked(key, column string, value any) {
 		return
 	}
 	if rowIndex, ok := t.fastPos[key]; ok {
+		t.fast[rowIndex].values[index] = value
+	}
+}
+
+// rekeyFastRowLocked moves a fast-path entry to a new primary key.
+func (t *Table) rekeyFastRowLocked(oldKey, newKey string, value any) {
+	if len(t.fast) == 0 {
+		return
+	}
+	rowIndex, ok := t.fastPos[oldKey]
+	if !ok {
+		return
+	}
+	delete(t.fastPos, oldKey)
+	t.fast[rowIndex].key = newKey
+	t.fastPos[newKey] = rowIndex
+	if index, ok := t.columns[t.primaryColumn()]; ok {
 		t.fast[rowIndex].values[index] = value
 	}
 }

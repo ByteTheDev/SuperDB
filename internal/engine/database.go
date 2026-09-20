@@ -22,7 +22,22 @@ func (d *Database) ExecBatch(sqls []string) ([]Result, error) {
 }
 
 func (d *Database) Exec(sql string) (Result, error) {
-	s := strings.TrimSpace(strings.TrimSuffix(sql, ";"))
+	write := !hasPrefixFold(strings.TrimSpace(sql), "SELECT")
+	if write {
+		d.commitMu.Lock()
+		defer d.commitMu.Unlock()
+	}
+	d.gate.RLock()
+	defer d.gate.RUnlock()
+	result, err := d.exec(sql)
+	if write && err == nil {
+		d.revision.Add(1)
+	}
+	return result, err
+}
+
+func (d *Database) exec(sql string) (Result, error) {
+	s := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sql), ";"))
 	// Prefix dispatch without upper-casing the whole statement: VALUES
 	// payloads can be large and only the leading keyword matters here.
 	switch {

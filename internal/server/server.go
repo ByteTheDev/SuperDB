@@ -146,11 +146,19 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		if s.tx == nil {
 			return map[string]string{"error": "no transaction active"}
 		}
-		if err := s.db.ReplaceFrom(s.tx); err != nil {
-			return map[string]string{"error": "commit: " + err.Error()}
+		writes := writeStatements(s.txSQL)
+		if len(writes) == 0 {
+			s.tx = nil
+			s.txSQL = nil
+			return map[string]string{"message": "COMMIT ok"}
 		}
-		if err := persistStatements(mode, data, s.txSQL, s.db, s.walWriter); err != nil {
-			return map[string]string{"error": "persist transaction: " + err.Error()}
+		// Persist-before-publish with conflict detection: the WAL/snapshot
+		// is written from the committed image first, then the image is
+		// published only if no other writer committed since BEGIN.
+		if err := s.db.CommitFrom(s.tx, func(img *engine.Database) error {
+			return persistStatements(mode, data, writes, img, s.walWriter)
+		}); err != nil {
+			return map[string]string{"error": "commit: " + err.Error()}
 		}
 		s.tx = nil
 		s.txSQL = nil
@@ -162,13 +170,52 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		return map[string]string{"error": err.Error()}
 	}
 	if s.tx != nil {
-		s.txSQL = append(s.txSQL, raw)
+		if isWriteSQL(raw) {
+			s.txSQL = append(s.txSQL, raw)
+		}
 	} else if s.batch {
-		s.pendingPersist = append(s.pendingPersist, raw)
-	} else if err := persistStatements(mode, data, []string{raw}, s.db, s.walWriter); err != nil {
-		return map[string]string{"error": "persist: " + err.Error()}
+		if isWriteSQL(raw) {
+			s.pendingPersist = append(s.pendingPersist, raw)
+		}
+	} else if isWriteSQL(raw) {
+		if err := persistStatements(mode, data, []string{raw}, s.db, s.walWriter); err != nil {
+			return map[string]string{"error": "persist: " + err.Error()}
+		}
 	}
 	return res
+}
+
+// isWriteSQL mirrors engine.Database.Exec's read classification: only
+// SELECT statements skip durability. Everything else (including invalid
+// SQL, which never reaches persistence because Exec errors first) is a
+// write.
+func isWriteSQL(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if len(s) < 6 {
+		return true
+	}
+	for i := 0; i < 6; i++ {
+		c := s[i]
+		if 'a' <= c && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c != "SELECT"[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// writeStatements drops read-only statements from a recorded batch so the
+// WAL only carries statements that can mutate state.
+func writeStatements(sqls []string) []string {
+	out := sqls[:0]
+	for _, sql := range sqls {
+		if isWriteSQL(sql) {
+			out = append(out, sql)
+		}
+	}
+	return out
 }
 
 // equalFold reports whether s equals keyword case-insensitively without

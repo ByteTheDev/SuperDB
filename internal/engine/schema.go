@@ -24,11 +24,11 @@ func (d *Database) createIndex(s string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if !hasColumn(t.Columns, column) {
 		return Result{}, fmt.Errorf("column not found: %s", column)
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.Indexes == nil {
 		t.Indexes = make(map[string]map[string]map[string]struct{})
 	}
