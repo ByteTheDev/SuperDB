@@ -23,12 +23,12 @@ func (d *Database) insert(s string) (Result, error) {
 	// The VALUES parser is the hottest part of bulk INSERT. Keep the
 	// established parser available for parity tests and use the single-pass
 	// implementation on the production path.
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	rows, err := parseInsertRowsFast(s[vi+6:], t.Columns)
 	if err != nil {
 		return Result{}, err
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, item := range rows {
 		if _, ok := t.Rows[item.key]; ok {
 			return Result{}, errors.New("duplicate primary key")

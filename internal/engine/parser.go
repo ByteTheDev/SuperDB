@@ -57,15 +57,42 @@ func parseVal(raw string, typ Type) (any, error) {
 }
 
 func filter(s string) (string, string) {
+	c, v, _, err := parseMutationWhere(s)
+	if err != nil {
+		return "", ""
+	}
+	return c, v
+}
+
+// parseMutationWhere parses the WHERE clause of a DELETE/UPDATE statement.
+// It returns hasWhere=false when no WHERE keyword is present (caller applies
+// the mutation to all rows). When WHERE is present the remainder must be a
+// single `column = value` equality with both sides non-empty; anything else
+// (missing "=", empty column/value such as "WHERE id > 1" or bare "WHERE")
+// returns an invalid-WHERE error so callers never fall back to match-all.
+func parseMutationWhere(s string) (column, value string, hasWhere bool, err error) {
 	i := indexFold(s, "WHERE")
 	if i < 0 {
-		return "", ""
+		return "", "", false, nil
 	}
-	p := strings.SplitN(strings.TrimSpace(s[i+5:]), "=", 2)
+	rest := strings.TrimSpace(s[i+5:])
+	if rest == "" {
+		return "", "", true, errors.New("invalid WHERE expression")
+	}
+	// Only single-term equality is supported for mutations.
+	if indexFold(rest, " AND ") >= 0 || indexFold(rest, " OR ") >= 0 {
+		return "", "", true, errors.New("invalid WHERE expression")
+	}
+	p := strings.SplitN(rest, "=", 2)
 	if len(p) != 2 {
-		return "", ""
+		return "", "", true, errors.New("invalid WHERE expression")
 	}
-	return strings.ToLower(strings.TrimSpace(p[0])), strings.Trim(strings.TrimSpace(p[1]), "'")
+	column = strings.ToLower(strings.TrimSpace(p[0]))
+	raw := strings.TrimSpace(p[1])
+	if column == "" || raw == "" {
+		return "", "", true, errors.New("invalid WHERE expression")
+	}
+	return column, strings.Trim(raw, "'"), true, nil
 }
 
 func splitLogical(s, operator string) []string {

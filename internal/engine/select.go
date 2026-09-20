@@ -23,6 +23,8 @@ func (d *Database) selectRows(s string) (Result, error) {
 		return Result{}, err
 	}
 	selectExpr := strings.TrimSpace(s[6:fi])
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	names := []string{}
 	if selectExpr == "*" {
 		for _, c := range t.Columns {
@@ -40,8 +42,6 @@ func (d *Database) selectRows(s string) (Result, error) {
 	if isAggregate(selectExpr) {
 		return aggregateResult(t, selectExpr, where)
 	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
 	simpleColumn, simpleValue, simple := simpleEquality(where)
 	if simple && simpleColumn == t.primaryColumn() {
 		r := Result{Columns: names}
@@ -198,7 +198,10 @@ func (d *Database) selectRows(s string) (Result, error) {
 		}
 	} else {
 		for _, key := range t.Order {
-			row := t.Rows[key]
+			row, exists := t.Rows[key]
+			if !exists {
+				continue
+			}
 			if where != "" && !compiled.matchesMap(row) {
 				continue
 			}
@@ -401,8 +404,6 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 		return Result{}, errors.New("invalid aggregate")
 	}
 	column := strings.ToLower(strings.TrimSpace(expression[open+1 : close]))
-	t.mu.RLock()
-	defer t.mu.RUnlock()
 	compiled, validCondition := compileCondition(where, t.Columns)
 	if !validCondition {
 		return Result{}, errors.New("invalid WHERE expression")
@@ -457,7 +458,10 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 		}
 	} else {
 		for _, key := range t.Order {
-			row := t.Rows[key]
+			row, exists := t.Rows[key]
+			if !exists {
+				continue
+			}
 			if where != "" && !compiled.matchesMap(row) {
 				continue
 			}
