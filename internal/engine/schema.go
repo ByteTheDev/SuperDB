@@ -1,13 +1,14 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 )
 
-func (d *Database) createIndex(s string) (Result, error) {
+func (d *Database) createIndex(ctx context.Context, s string) (Result, error) {
 	upper := strings.ToUpper(s)
 	on := strings.Index(upper, " ON ")
 	open, close := strings.Index(s, "("), strings.LastIndex(s, ")")
@@ -36,7 +37,11 @@ func (d *Database) createIndex(s string) (Result, error) {
 		return Result{}, errors.New("index already exists for column")
 	}
 	index := make(map[string]map[string]struct{})
+	tick := &rowTicker{}
 	for key, row := range t.Rows {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		value := valueKey(row[column])
 		if index[value] == nil {
 			index[value] = make(map[string]struct{})
@@ -67,7 +72,7 @@ func valueKey(value any) string {
 	}
 }
 
-func (d *Database) alterTable(s string) (Result, error) {
+func (d *Database) alterTable(ctx context.Context, s string) (Result, error) {
 	parts := strings.Fields(s)
 	if len(parts) != 7 || !strings.EqualFold(parts[3], "ADD") || !strings.EqualFold(parts[4], "COLUMN") {
 		return Result{}, errors.New("only ALTER TABLE ... ADD COLUMN is supported")
@@ -87,7 +92,11 @@ func (d *Database) alterTable(s string) (Result, error) {
 		return Result{}, errors.New("column already exists")
 	}
 	t.Columns = append(t.Columns, Column{Name: column, Type: typ})
+	tick := &rowTicker{}
 	for _, row := range t.Rows {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		row[column] = nil
 	}
 	if len(t.fast) > 0 {

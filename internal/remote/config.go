@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"superdb/internal/server"
 )
 
 // Config controls the hosted SuperDB network server.
@@ -28,6 +30,10 @@ type Config struct {
 	AdvertiseAddr   string
 	JoinAddrs       []string
 	Region          string
+	// Limits bounds per-query resource use and admission control
+	// (timeouts, result size, inflight queries, transaction caps).
+	// Zero fields disable each cap.
+	Limits server.Limits
 }
 
 func defaults() Config {
@@ -48,7 +54,11 @@ func defaults() Config {
 // Explicit non-zero flag values win; otherwise env is consulted:
 // SUPERDB_HOST, SUPERDB_PORT (or PORT), SUPERDB_DATA_DIR, SUPERDB_USERNAME,
 // SUPERDB_PASSWORD, SUPERDB_TLS_CERT, SUPERDB_TLS_KEY,
-// SUPERDB_MAX_CONNECTIONS, SUPERDB_HEALTH_ADDR, SUPERDB_MODE.
+// SUPERDB_MAX_CONNECTIONS, SUPERDB_HEALTH_ADDR, SUPERDB_MODE,
+// SUPERDB_QUERY_TIMEOUT, SUPERDB_MAX_RESULT_ROWS, SUPERDB_MAX_RESULT_BYTES,
+// SUPERDB_MAX_INFLIGHT_QUERIES, SUPERDB_QUERY_QUEUE_TIMEOUT,
+// SUPERDB_MAX_BATCH_STATEMENTS, SUPERDB_MAX_TX_STATEMENTS,
+// SUPERDB_MAX_TX_DATABASE_ROWS.
 func LoadConfig(flag Config) Config {
 	cfg := defaults()
 	merge := func() {
@@ -106,6 +116,7 @@ func LoadConfig(flag Config) Config {
 		if flag.Region != "" {
 			cfg.Region = flag.Region
 		}
+		mergeLimits(&cfg.Limits, flag.Limits)
 	}
 	// Env first, then explicit flags override.
 	if v := os.Getenv("SUPERDB_HOST"); v != "" {
@@ -146,11 +157,69 @@ func LoadConfig(flag Config) Config {
 	if v := os.Getenv("SUPERDB_HEALTH_ADDR"); v != "" {
 		cfg.HealthAddr = v
 	}
+	if v := os.Getenv("SUPERDB_QUERY_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Limits.QueryTimeout = d
+		}
+	}
+	if v := os.Getenv("SUPERDB_QUERY_QUEUE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Limits.AcquireTimeout = d
+		}
+	}
+	for env, dst := range map[string]*int{
+		"SUPERDB_MAX_RESULT_ROWS":      &cfg.Limits.MaxResultRows,
+		"SUPERDB_MAX_RESULT_BYTES":     &cfg.Limits.MaxResultBytes,
+		"SUPERDB_MAX_INFLIGHT_QUERIES": &cfg.Limits.MaxInflightQueries,
+		"SUPERDB_MAX_BATCH_STATEMENTS": &cfg.Limits.MaxBatchStatements,
+		"SUPERDB_MAX_TX_STATEMENTS":    &cfg.Limits.MaxTxStatements,
+		"SUPERDB_MAX_TX_DATABASE_ROWS": &cfg.Limits.MaxTxDatabaseRows,
+	} {
+		if v := os.Getenv(env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				*dst = n
+			}
+		}
+	}
 	merge()
 	if cfg.MaxConnections <= 0 {
 		cfg.MaxConnections = 128
 	}
 	return cfg
+}
+
+// mergeLimits copies each explicitly-set (non-zero) limit from src.
+func mergeLimits(dst *server.Limits, src server.Limits) {
+	if src.QueryTimeout != 0 {
+		dst.QueryTimeout = src.QueryTimeout
+	}
+	if src.MaxResultRows != 0 {
+		dst.MaxResultRows = src.MaxResultRows
+	}
+	if src.MaxResultBytes != 0 {
+		dst.MaxResultBytes = src.MaxResultBytes
+	}
+	if src.MaxInflightQueries != 0 {
+		dst.MaxInflightQueries = src.MaxInflightQueries
+	}
+	if src.AcquireTimeout != 0 {
+		dst.AcquireTimeout = src.AcquireTimeout
+	}
+	if src.MaxConnections != 0 {
+		dst.MaxConnections = src.MaxConnections
+	}
+	if src.MaxBatchStatements != 0 {
+		dst.MaxBatchStatements = src.MaxBatchStatements
+	}
+	if src.MaxTxStatements != 0 {
+		dst.MaxTxStatements = src.MaxTxStatements
+	}
+	if src.MaxTxDatabaseRows != 0 {
+		dst.MaxTxDatabaseRows = src.MaxTxDatabaseRows
+	}
+	if src.MaxRequestBytes != 0 {
+		dst.MaxRequestBytes = src.MaxRequestBytes
+	}
 }
 
 // Authenticator verifies credentials with constant-time comparison.

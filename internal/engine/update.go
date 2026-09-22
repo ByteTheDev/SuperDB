@@ -1,11 +1,12 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 )
 
-func (d *Database) update(s string) (Result, error) {
+func (d *Database) update(ctx context.Context, s string) (Result, error) {
 	si := indexKeyword(s, "SET")
 	if si < 0 {
 		return Result{}, errors.New("UPDATE requires SET")
@@ -70,7 +71,11 @@ func (d *Database) update(s string) (Result, error) {
 		return t.updatePrimaryMultiLocked(wc, wv, v)
 	}
 	n := 0
+	tick := &rowTicker{}
 	for key, row := range t.Rows {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		if wc != "" && !matchWhereValue(row[wc], wv) {
 			continue
 		}

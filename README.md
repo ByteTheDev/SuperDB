@@ -106,6 +106,21 @@ client with `--auth-key` (or `SUPERDB_AUTH_KEY`). Without the correct key the
 server returns an `unauthorized` error and runs no SQL. When no key is
 configured, authentication is disabled for backward compatibility.
 
+Connection and query safety limits are available on both servers:
+
+```bash
+go run ./cmd/superdb server --query-timeout 10s --max-result-rows 100000 \
+    --max-result-bytes 33554432 --max-inflight-queries 64 --max-connections 512
+```
+
+Additional caps: `--query-queue-timeout` (wait for an inflight slot before
+rejecting, default 5s), `--max-batch-statements`, `--max-tx-statements`
+(abort oversized session transactions), `--max-tx-database-rows` (reject
+`BEGIN` when the database is too large to clone safely), and
+`--max-request-bytes` (default 16 MiB). Every limit defaults to disabled.
+The `serve` command exposes the same limits as flags and `SUPERDB_*`
+environment variables; see [docs/hosted.md](docs/hosted.md).
+
 ### Developer commands
 
 Run `go run ./cmd/superdb` with no command to open the interactive menu. Every menu action is also available directly:

@@ -12,6 +12,8 @@ import (
 	"superdb/internal/engine"
 )
 
+// maxRequestSize is the default per-request payload cap. Servers may
+// lower or raise it via Limits.MaxRequestBytes.
 const maxRequestSize = 16 << 20
 
 // payloadPool recycles request/response buffers up to 64 KiB, the common
@@ -37,13 +39,16 @@ type request struct {
 	Atomic bool `json:"atomic,omitempty"`
 }
 
-func readRequest(r *bufio.Reader) (request, error) {
+func readRequest(r *bufio.Reader, maxBytes int) (request, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxRequestSize
+	}
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return request{}, err
 	}
 	size := binary.BigEndian.Uint32(header[:])
-	if size > maxRequestSize {
+	if uint64(size) > uint64(maxBytes) {
 		return request{}, errors.New("request too large")
 	}
 	var payload []byte
@@ -89,6 +94,14 @@ func readRequest(r *bufio.Reader) (request, error) {
 }
 
 func writeResponse(w *bufio.Writer, value any) error {
+	return writeResponseLimit(w, value, 0)
+}
+
+// writeResponseLimit encodes and writes value like writeResponse, then
+// enforces maxBytes on the encoded payload. Oversized responses are
+// replaced with an error payload so a runaway result can never exceed
+// the configured per-response budget.
+func writeResponseLimit(w *bufio.Writer, value any, maxBytes int) error {
 	buf, ok := bufferPool.Get().(*bytes.Buffer)
 	if !ok {
 		buf = new(bytes.Buffer)
@@ -99,6 +112,14 @@ func writeResponse(w *bufio.Writer, value any) error {
 		buf.Reset()
 		bufferPool.Put(buf)
 		return err
+	}
+	if maxBytes > 0 && len(payload) > maxBytes {
+		payload, err = appendResponseValue(buf.Bytes()[:0], map[string]string{"error": "response exceeds maximum result size"})
+		if err != nil {
+			buf.Reset()
+			bufferPool.Put(buf)
+			return err
+		}
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))

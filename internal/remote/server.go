@@ -31,6 +31,7 @@ type Server struct {
 	metrics *Metrics
 
 	cluster  ClusterExec
+	limiter  *server.Limiter
 	shutdown func()
 
 	mu       sync.Mutex
@@ -65,6 +66,7 @@ func New(db *engine.Database, cfg Config, cluster ClusterExec) *Server {
 		auth:    NewAuthenticator(cfg.Username, cfg.Password),
 		metrics: m,
 		cluster: cluster,
+		limiter: server.NewLimiter(cfg.Limits),
 		conns:   make(map[net.Conn]struct{}),
 		closed:  make(chan struct{}),
 	}
@@ -261,7 +263,7 @@ func (s *Server) handleConn(c net.Conn) {
 	}
 	r := bufio.NewReaderSize(c, 64<<10)
 	w := bufio.NewWriterSize(c, 64<<10)
-	sess := &session{db: s.db, walWriter: s.walWriter, cluster: s.cluster, mode: s.cfg.Mode, dataDir: s.cfg.DataDir}
+	sess := &session{db: s.db, walWriter: s.walWriter, cluster: s.cluster, mode: s.cfg.Mode, dataDir: s.cfg.DataDir, limits: s.cfg.Limits}
 	if !s.auth.Required() {
 		sess.authed = true
 	}
@@ -277,11 +279,32 @@ func (s *Server) handleConn(c net.Conn) {
 		}
 		s.metrics.bytesRx.Add(uint64(wire.HeaderLen) + uint64(len(payload)))
 		start := time.Now()
-		respType, respID, respPayload := s.dispatch(sess, hdr, payload, c)
+		var respType uint8
+		var respID uint64
+		var respPayload []byte
+		if isQueryFrame(hdr.Type) {
+			// Backpressure: bound concurrent engine work. Requests that
+			// cannot take a slot within AcquireTimeout are rejected with
+			// a retryable SERVER_BUSY instead of queueing unboundedly.
+			if err := s.limiter.AcquireQuery(context.Background()); err != nil {
+				s.metrics.rejectedQueries.Add(1)
+				respType, respID = wire.TypeResponse, hdr.RequestID
+				respPayload = wire.ErrorResponse(hdr.RequestID, wire.ErrBusy, "server overloaded; retry later")
+			} else {
+				respType, respID, respPayload = s.dispatch(sess, hdr, payload, c)
+				s.limiter.ReleaseQuery()
+			}
+		} else {
+			respType, respID, respPayload = s.dispatch(sess, hdr, payload, c)
+		}
 		s.metrics.queries.Add(1)
 		s.metrics.latencyNanos.Add(uint64(time.Since(start).Nanoseconds()))
 		if s.cfg.WriteTimeout > 0 {
 			_ = c.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
+		}
+		if max := s.cfg.Limits.MaxResultBytes; max > 0 && len(respPayload) > max {
+			s.metrics.failedQueries.Add(1)
+			respPayload = wire.ErrorResponse(respID, wire.ErrResultTooLarge, "result exceeds maximum size")
 		}
 		if len(respPayload) > wire.MaxFrameSize {
 			respPayload = wire.ErrorResponse(respID, wire.ErrInternal, "response too large")
@@ -316,6 +339,27 @@ func (s *Server) dispatch(sess *session, hdr wire.Header, payload []byte, c net.
 		out = s.handle(sess, hdr, payload)
 	}()
 	return wire.TypeResponse, hdr.RequestID, out
+}
+
+// isQueryFrame reports whether a frame type executes engine work and so
+// must pass through inflight-query admission control.
+func isQueryFrame(t uint8) bool {
+	switch t {
+	case wire.TypeQuery, wire.TypeExec, wire.TypeBegin, wire.TypeCommit, wire.TypeRollback:
+		return true
+	default:
+		return false
+	}
+}
+
+// queryContext applies the configured per-statement timeout. Zero leaves
+// execution unbounded; a negative or already-expired timeout cancels
+// synchronously.
+func (s *Server) queryContext() (context.Context, context.CancelFunc) {
+	if s.cfg.Limits.QueryTimeout == 0 {
+		return context.Background(), func() {}
+	}
+	return context.WithTimeout(context.Background(), s.cfg.Limits.QueryTimeout)
 }
 
 func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
@@ -383,7 +427,9 @@ func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
 			}
 			return wire.ErrorResponse(hdr.RequestID, wire.ErrInvalidRequest, err.Error())
 		}
-		res, _, execErr := sess.execOne(bound)
+		ctx, cancel := s.queryContext()
+		defer cancel()
+		res, _, execErr := sess.execOne(ctx, bound)
 		if execErr != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := execErr.(*execError); ok {
@@ -401,7 +447,7 @@ func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
 		if s.auth.Required() && !sess.authed {
 			return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
 		}
-		res, _, err := sess.execOne("BEGIN")
+		res, _, err := sess.execOne(context.Background(), "BEGIN")
 		if err != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := err.(*execError); ok {
@@ -414,7 +460,7 @@ func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
 		if s.auth.Required() && !sess.authed {
 			return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
 		}
-		res, _, err := sess.execOne("COMMIT")
+		res, _, err := sess.execOne(context.Background(), "COMMIT")
 		if err != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := err.(*execError); ok {
@@ -427,7 +473,7 @@ func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
 		if s.auth.Required() && !sess.authed {
 			return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
 		}
-		res, _, err := sess.execOne("ROLLBACK")
+		res, _, err := sess.execOne(context.Background(), "ROLLBACK")
 		if err != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := err.(*execError); ok {

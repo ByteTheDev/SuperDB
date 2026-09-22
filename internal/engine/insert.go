@@ -1,11 +1,12 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 )
 
-func (d *Database) insert(s string) (Result, error) {
+func (d *Database) insert(ctx context.Context, s string) (Result, error) {
 	vi := indexKeyword(s, "VALUES")
 	if vi < 0 {
 		return Result{}, errors.New("INSERT requires VALUES")
@@ -29,12 +30,19 @@ func (d *Database) insert(s string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	tick := &rowTicker{}
 	for _, item := range rows {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		if _, ok := t.Rows[item.key]; ok {
 			return Result{}, errors.New("duplicate primary key")
 		}
 	}
 	for _, item := range rows {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		t.Rows[item.key] = item.row
 		t.Order = append(t.Order, item.key)
 		for column := range t.Indexes {

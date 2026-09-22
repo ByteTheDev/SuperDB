@@ -30,4 +30,6 @@ const (
 	ErrUnsupported    = "UNSUPPORTED"
 	ErrInternal       = "INTERNAL_ERROR"
 	ErrProtocol       = "PROTOCOL_ERROR"
+	ErrBusy           = "SERVER_BUSY"
+	ErrResultTooLarge = "RESULT_TOO_LARGE"
 )

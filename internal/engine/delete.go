@@ -1,11 +1,12 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 )
 
-func (d *Database) delete(s string) (Result, error) {
+func (d *Database) delete(ctx context.Context, s string) (Result, error) {
 	rest := strings.TrimSpace(s[len("DELETE FROM"):])
 	tableName, ok := firstField(rest)
 	if !ok {
@@ -36,7 +37,11 @@ func (d *Database) delete(s string) (Result, error) {
 	}
 	n := 0
 	remaining := t.Order[:0]
+	tick := &rowTicker{}
 	for _, k := range t.Order {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		row, ok := t.Rows[k]
 		if !ok {
 			continue

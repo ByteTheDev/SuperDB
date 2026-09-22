@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -8,7 +9,7 @@ import (
 	"strings"
 )
 
-func (d *Database) selectRows(s string) (Result, error) {
+func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Result, error) {
 	fi := indexKeyword(s, "FROM")
 	if fi < 0 {
 		return Result{}, errors.New("SELECT requires FROM")
@@ -40,7 +41,16 @@ func (d *Database) selectRows(s string) (Result, error) {
 		return Result{}, err
 	}
 	if isAggregate(selectExpr) {
-		return aggregateResult(t, selectExpr, where)
+		return aggregateResult(ctx, t, selectExpr, where)
+	}
+	tick := &rowTicker{}
+	// rowCap bounds materialized rows: when a MaxRows policy applies, emit
+	// at most maxRows+1 so exceeding the cap is detected (and aborted)
+	// without buffering an unbounded result. The explicit LIMIT still
+	// wins when it is smaller.
+	rowCap := limit
+	if maxRows > 0 && (rowCap < 0 || rowCap > maxRows) {
+		rowCap = maxRows + 1
 	}
 	simpleColumn, simpleValue, simple := simpleEquality(where)
 	if simple && simpleColumn == t.primaryColumn() {
@@ -95,12 +105,15 @@ func (d *Database) selectRows(s string) (Result, error) {
 			case fastInt:
 				exp := term.expected.(int64)
 				for _, row := range t.fast {
+					if err := tick.tick(ctx); err != nil {
+						return Result{}, err
+					}
 					if row.key == "" {
 						continue
 					}
 					if v, isInt := row.values[term.index].(int64); isInt && v == exp {
 						emit(row)
-						if limit >= 0 && len(r.Rows) >= limit {
+						if rowCap >= 0 && len(r.Rows) >= rowCap {
 							break
 						}
 					}
@@ -108,12 +121,15 @@ func (d *Database) selectRows(s string) (Result, error) {
 			case fastString:
 				exp := term.expected.(string)
 				for _, row := range t.fast {
+					if err := tick.tick(ctx); err != nil {
+						return Result{}, err
+					}
 					if row.key == "" {
 						continue
 					}
 					if v, isString := row.values[term.index].(string); isString && v == exp {
 						emit(row)
-						if limit >= 0 && len(r.Rows) >= limit {
+						if rowCap >= 0 && len(r.Rows) >= rowCap {
 							break
 						}
 					}
@@ -121,12 +137,15 @@ func (d *Database) selectRows(s string) (Result, error) {
 			case fastBool:
 				exp := term.expected.(bool)
 				for _, row := range t.fast {
+					if err := tick.tick(ctx); err != nil {
+						return Result{}, err
+					}
 					if row.key == "" {
 						continue
 					}
 					if v, isBool := row.values[term.index].(bool); isBool && v == exp {
 						emit(row)
-						if limit >= 0 && len(r.Rows) >= limit {
+						if rowCap >= 0 && len(r.Rows) >= rowCap {
 							break
 						}
 					}
@@ -134,18 +153,24 @@ func (d *Database) selectRows(s string) (Result, error) {
 			case fastFloat:
 				exp := term.expected.(float64)
 				for _, row := range t.fast {
+					if err := tick.tick(ctx); err != nil {
+						return Result{}, err
+					}
 					if row.key == "" {
 						continue
 					}
 					if v, isFloat := row.values[term.index].(float64); isFloat && v == exp {
 						emit(row)
-						if limit >= 0 && len(r.Rows) >= limit {
+						if rowCap >= 0 && len(r.Rows) >= rowCap {
 							break
 						}
 					}
 				}
 			default:
 				for _, row := range t.fast {
+					if err := tick.tick(ctx); err != nil {
+						return Result{}, err
+					}
 					if row.key == "" {
 						continue
 					}
@@ -153,14 +178,17 @@ func (d *Database) selectRows(s string) (Result, error) {
 						continue
 					}
 					emit(row)
-					if limit >= 0 && len(r.Rows) >= limit {
+					if rowCap >= 0 && len(r.Rows) >= rowCap {
 						break
 					}
 				}
 			}
-			return r, nil
+			return r, capResultRows(r, maxRows)
 		}
 		for _, row := range t.fast {
+			if err := tick.tick(ctx); err != nil {
+				return Result{}, err
+			}
 			if row.key == "" {
 				continue
 			}
@@ -168,17 +196,23 @@ func (d *Database) selectRows(s string) (Result, error) {
 				continue
 			}
 			r.Rows = append(r.Rows, selectedFastValues(row, names, t.columns))
-			if limit >= 0 && len(r.Rows) >= limit {
+			if rowCap >= 0 && len(r.Rows) >= rowCap {
 				break
 			}
 		}
-		return r, nil
+		return r, capResultRows(r, maxRows)
 	}
 	if simple && t.Indexes[simpleColumn] != nil {
 		// Verify candidates against the fast array when available: no
 		// per-row map lookups, same single-term semantics via matchFastTerm.
 		if fastTermOK {
 			for key := range t.Indexes[simpleColumn][simpleValue] {
+				if err := tick.tick(ctx); err != nil {
+					return Result{}, err
+				}
+				if orderColumn == "" && rowCap >= 0 && len(keys) >= rowCap {
+					break
+				}
 				if fi, present := t.fastPos[key]; present && t.fast[fi].key != "" {
 					if matchFastTerm(t.fast[fi].values, term) {
 						keys = append(keys, key)
@@ -191,6 +225,12 @@ func (d *Database) selectRows(s string) (Result, error) {
 			}
 		} else {
 			for key := range t.Indexes[simpleColumn][simpleValue] {
+				if err := tick.tick(ctx); err != nil {
+					return Result{}, err
+				}
+				if orderColumn == "" && rowCap >= 0 && len(keys) >= rowCap {
+					break
+				}
 				if row, exists := t.Rows[key]; exists && compiled.matchesMap(row) {
 					keys = append(keys, key)
 				}
@@ -198,6 +238,9 @@ func (d *Database) selectRows(s string) (Result, error) {
 		}
 	} else {
 		for _, key := range t.Order {
+			if err := tick.tick(ctx); err != nil {
+				return Result{}, err
+			}
 			row, exists := t.Rows[key]
 			if !exists {
 				continue
@@ -206,9 +249,15 @@ func (d *Database) selectRows(s string) (Result, error) {
 				continue
 			}
 			keys = append(keys, key)
+			if orderColumn == "" && rowCap >= 0 && len(keys) >= rowCap {
+				break
+			}
 		}
 	}
 	if orderColumn != "" {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		sort.SliceStable(keys, func(i, j int) bool {
 			leftValue, rightValue := t.Rows[keys[i]][orderColumn], t.Rows[keys[j]][orderColumn]
 			if descending {
@@ -217,8 +266,8 @@ func (d *Database) selectRows(s string) (Result, error) {
 			return valueLess(leftValue, rightValue)
 		})
 	}
-	if limit >= 0 && len(keys) > limit {
-		keys = keys[:limit]
+	if rowCap >= 0 && len(keys) > rowCap {
+		keys = keys[:rowCap]
 	}
 	r := Result{Columns: names, Rows: make([][]any, 0, len(keys))}
 	if len(t.fast) > 0 {
@@ -234,7 +283,16 @@ func (d *Database) selectRows(s string) (Result, error) {
 			r.Rows = append(r.Rows, selectedValues(t.Rows[key], names))
 		}
 	}
-	return r, nil
+	return r, capResultRows(r, maxRows)
+}
+
+// capResultRows enforces the MaxRows policy: scans stop at maxRows+1
+// emitted rows, so len(rows) > maxRows proves the cap was exceeded.
+func capResultRows(r Result, maxRows int) error {
+	if maxRows > 0 && len(r.Rows) > maxRows {
+		return fmt.Errorf("%w: %d rows emitted (limit %d)", ErrResultTooLarge, len(r.Rows), maxRows)
+	}
+	return nil
 }
 
 func simpleEquality(expression string) (column, value string, ok bool) {
@@ -394,7 +452,7 @@ func isAggregate(expression string) bool {
 	return hasPrefixFold(trimmed, "COUNT(") || hasPrefixFold(trimmed, "SUM(") || hasPrefixFold(trimmed, "MIN(") || hasPrefixFold(trimmed, "MAX(")
 }
 
-func aggregateResult(t *Table, expression, where string) (Result, error) {
+func aggregateResult(ctx context.Context, t *Table, expression, where string) (Result, error) {
 	trimmed := strings.TrimSpace(expression)
 	isSum := hasPrefixFold(trimmed, "SUM(")
 	isMin := hasPrefixFold(trimmed, "MIN(")
@@ -412,6 +470,7 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 	count := 0
 	var total float64
 	var minValue, maxValue any
+	tick := &rowTicker{}
 	if len(t.fast) > 0 {
 		columnIndex, hasColumn := t.columns[column]
 		if column != "*" && !hasColumn {
@@ -420,6 +479,9 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 		matchAll := where == ""
 		term, simple := simpleFastTerm(where, t)
 		for _, row := range t.fast {
+			if err := tick.tick(ctx); err != nil {
+				return Result{}, err
+			}
 			if row.key == "" {
 				continue
 			}
@@ -460,6 +522,9 @@ func aggregateResult(t *Table, expression, where string) (Result, error) {
 		}
 	} else {
 		for _, key := range t.Order {
+			if err := tick.tick(ctx); err != nil {
+				return Result{}, err
+			}
 			row, exists := t.Rows[key]
 			if !exists {
 				continue
