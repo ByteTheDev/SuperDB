@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.0 — Engine correctness and lifecycle fixes (2026-09-26)
+
+Fixed:
+
+- WHERE comparison operators `!=`, `<>`, `<`, `<=`, `>`, `>=` now work in
+  SELECT/UPDATE/DELETE/aggregates; ordered comparisons use declared column
+  types on both small-table and fast paths.
+- `''` inside quoted literals decodes to `'`, and all scanners treat it as
+  an escape, so bound parameters containing apostrophes round-trip.
+- Unknown columns in WHERE, ORDER BY, and aggregates are rejected instead
+  of silently returning empty results or mutating nothing.
+- `ORDER  BY` with irregular spacing parses; tables without a PRIMARY KEY
+  accept inserts under synthetic `#N` row keys.
+- CREATE INDEX and cluster table extraction no longer corrupt byte offsets
+  on multibyte input.
+- Go client: `Close` sends the TypeClose frame; connection failures fail
+  fast instead of hanging; `superdb://` URLs no longer double-decode
+  credentials and database names.
+- Local atomic batches are truly atomic (clone + publish-on-success) and
+  are rejected inside session transactions; unset cluster query timeout is
+  unbounded; hosted password-only auth and `MaxConnections` are enforced.
+
+Performance: JSON marshaling parity for U+2028/U+2029, no per-query
+uppercase allocations in cluster classification, dead code removed.
+
 ## v0.4.1 — Query safety limits (2026-09-22)
 
 - Add configurable query timeouts, result row and byte caps, request and batch
