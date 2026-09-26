@@ -37,6 +37,10 @@ type Table struct {
 	// clones, and the wire format are unchanged.
 	dead     int
 	fastDead int
+	// autoKey allocates synthetic "#N" row keys for tables without a
+	// primary key. In-memory only: never serialized, so restored tables
+	// restart at zero and skip any "#N" keys already present.
+	autoKey uint64
 }
 
 type Database struct {

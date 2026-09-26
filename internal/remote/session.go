@@ -2,12 +2,15 @@ package remote
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
-	"time"
 
 	"superdb/internal/cluster"
 	"superdb/internal/engine"
+	"superdb/internal/server"
 	"superdb/internal/storage"
+	"superdb/internal/wire"
 )
 
 // ClusterExec is the subset of cluster.Node used by remote sessions.
@@ -29,6 +32,7 @@ type session struct {
 	cluster   ClusterExec
 	mode      string
 	dataDir   string
+	limits    server.Limits
 	authed    bool
 	database  string
 	authFails int
@@ -52,18 +56,25 @@ func bind(sql string, params []any) (string, error) {
 	return engine.BindParams(sql, params)
 }
 
-// execOne executes a single already-bound statement.
-func (s *session) execOne(raw string) (engine.Result, string, error) {
+// execOne executes a single already-bound statement honoring ctx
+// cancellation and the session's configured limits.
+func (s *session) execOne(ctx context.Context, raw string) (engine.Result, string, error) {
 	if s.cluster != nil {
 		trimmed := strings.TrimSpace(raw)
 		if isTxKeyword(trimmed) {
 			return engine.Result{}, "", &execError{Code: "UNSUPPORTED", Msg: "session transactions are not supported in cluster mode; send atomic batches instead"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+		if timeout := s.limits.QueryTimeout; timeout > 0 {
+			qctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			ctx = qctx
+		}
 		res, err := s.cluster.Exec(ctx, raw)
 		if err != nil {
 			return engine.Result{}, "", mapClusterError(err)
+		}
+		if lim := s.limits.MaxResultRows; lim > 0 && len(res.Rows) > lim {
+			return engine.Result{}, "", &execError{Code: wire.ErrResultTooLarge, Msg: fmt.Sprintf("result row limit exceeded: %d rows (limit %d)", len(res.Rows), lim)}
 		}
 		return res, "", nil
 	}
@@ -71,6 +82,11 @@ func (s *session) execOne(raw string) (engine.Result, string, error) {
 	if equalFold(sql, "BEGIN") {
 		if s.tx != nil {
 			return engine.Result{}, "", &execError{Code: "INVALID_REQUEST", Msg: "transaction already active"}
+		}
+		// A session transaction clones the whole database; reject BEGIN
+		// beyond the row budget so one connection cannot pin a huge copy.
+		if lim := s.limits.MaxTxDatabaseRows; lim > 0 && s.db.RowCount() > lim {
+			return engine.Result{}, "", &execError{Code: wire.ErrBusy, Msg: fmt.Sprintf("transaction rejected: database holds %d rows (limit %d)", s.db.RowCount(), lim), Retryable: true}
 		}
 		clone, err := s.db.Clone()
 		if err != nil {
@@ -108,12 +124,19 @@ func (s *session) execOne(raw string) (engine.Result, string, error) {
 		return engine.Result{Message: "COMMIT ok"}, "", nil
 	}
 	db := s.active()
-	res, err := db.Exec(raw)
+	res, err := db.ExecWithOptions(ctx, raw, engine.ExecOptions{MaxRows: s.limits.MaxResultRows})
 	if err != nil {
-		return engine.Result{}, "", &execError{Code: queryErrorCode(err), Msg: err.Error()}
+		return engine.Result{}, "", mapEngineError(err)
 	}
 	if s.tx != nil {
 		if isWriteSQL(raw) {
+			if lim := s.limits.MaxTxStatements; lim > 0 && len(s.txSQL) >= lim {
+				// Aborting frees the session clone, the dominant
+				// per-connection memory cost of an oversized tx.
+				s.tx = nil
+				s.txSQL = nil
+				return engine.Result{}, "", &execError{Code: "INVALID_REQUEST", Msg: fmt.Sprintf("transaction aborted: exceeded %d buffered statements", lim)}
+			}
 			s.txSQL = append(s.txSQL, raw)
 		}
 	} else if isWriteSQL(raw) {
@@ -122,6 +145,21 @@ func (s *session) execOne(raw string) (engine.Result, string, error) {
 		}
 	}
 	return res, "", nil
+}
+
+// mapEngineError converts engine failures — including context timeouts,
+// cancellation, and result-limit violations — to stable wire codes.
+func mapEngineError(err error) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return &execError{Code: wire.ErrTimeout, Msg: "query timeout exceeded", Retryable: true}
+	case errors.Is(err, context.Canceled):
+		return &execError{Code: wire.ErrTimeout, Msg: "query canceled", Retryable: true}
+	case errors.Is(err, engine.ErrResultTooLarge):
+		return &execError{Code: wire.ErrResultTooLarge, Msg: err.Error()}
+	default:
+		return &execError{Code: queryErrorCode(err), Msg: err.Error()}
+	}
 }
 
 type execError struct {

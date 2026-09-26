@@ -55,6 +55,21 @@ func TestParseURLEncoding(t *testing.T) {
 	}
 }
 
+func TestParseURLDoesNotDoubleDecode(t *testing.T) {
+	// A password whose literal value is "p%20ss" is encoded %2520. Decoding
+	// twice would corrupt it to "p ss"; exactly once yields "p%20ss".
+	cfg, err := ParseURL("superdb://u:p%2520ss@h:1/db%25x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Password != "p%20ss" {
+		t.Fatalf("password double-decoded: %q", cfg.Password)
+	}
+	if cfg.Database != "db%x" {
+		t.Fatalf("database double-decoded: %q", cfg.Database)
+	}
+}
+
 func TestParseTLSModes(t *testing.T) {
 	for _, raw := range []string{"superdb://h:1/db?tls=insecure", "superdb://h:1/db?tls_skip_verify=true"} {
 		cfg, err := ParseURL(raw)

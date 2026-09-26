@@ -122,8 +122,30 @@ Flags override environment:
 | `--tls-key` | `SUPERDB_TLS_KEY` | "" |
 | `--max-connections` | `SUPERDB_MAX_CONNECTIONS` | `128` |
 | `--health-addr` | `SUPERDB_HEALTH_ADDR` | "" (disabled) |
+| `--query-timeout` | `SUPERDB_QUERY_TIMEOUT` | `0` (disabled) |
+| `--max-result-rows` | `SUPERDB_MAX_RESULT_ROWS` | `0` (disabled) |
+| `--max-result-bytes` | `SUPERDB_MAX_RESULT_BYTES` | `0` (disabled) |
+| `--max-inflight-queries` | `SUPERDB_MAX_INFLIGHT_QUERIES` | `0` (disabled) |
+| `--query-queue-timeout` | `SUPERDB_QUERY_QUEUE_TIMEOUT` | `5s` |
+| `--max-tx-statements` | `SUPERDB_MAX_TX_STATEMENTS` | `0` (disabled) |
+| `--max-tx-database-rows` | `SUPERDB_MAX_TX_DATABASE_ROWS` | `0` (disabled) |
 
 `PORT` is respected for Railway/Fly/Render-style platforms.
+
+### Safety limits
+
+`--query-timeout` bounds each statement; the engine checks cancellation
+at entry and inside scan loops, so timed-out queries abort mid-scan
+(`TIMEOUT`, retryable). `--max-result-rows` aborts SELECTs that would
+return more rows (`RESULT_TOO_LARGE`), and `--max-result-bytes` caps the
+encoded response. `--max-inflight-queries` bounds concurrent engine work
+across all connections; requests that cannot start within
+`--query-queue-timeout` fail fast with `SERVER_BUSY` (retryable) instead
+of queueing unboundedly. `--max-tx-statements` bounds statements buffered
+in a session transaction (overflow aborts the tx), and
+`--max-tx-database-rows` rejects `BEGIN` on databases larger than the cap
+because a session transaction clones the database. All limits default to
+disabled for backward compatibility.
 
 ## Docker
 
@@ -172,7 +194,8 @@ Responses echo `request_id` so clients can pipeline/multiplex; per-connection
 writes are serialized. Unknown versions get a protocol error, never
 undefined behavior. Error codes: `AUTH_FAILED AUTH_REQUIRED
 INVALID_REQUEST QUERY_ERROR NOT_FOUND NOT_LEADER TIMEOUT UNSUPPORTED
-INTERNAL_ERROR PROTOCOL_ERROR`. Reads/writes route through Raft when the
+INTERNAL_ERROR PROTOCOL_ERROR SERVER_BUSY RESULT_TOO_LARGE`.
+Reads/writes route through Raft when the
 node is clustered (writes require the leader; followers return `NOT_LEADER`
 with `retryable:true` instead of fake-acking before quorum).
 

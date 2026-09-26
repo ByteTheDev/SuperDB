@@ -159,7 +159,15 @@ func appendJSONString(out []byte, s string) []byte {
 				out = append(out, "\uFFFD"...)
 				continue
 			}
-			out = append(out, s[i:i+size]...)
+			// encoding/json escapes U+2028/U+2029 so output stays valid
+			// inside <script> contexts; keep parity.
+			if r == '\u2028' {
+				out = append(out, "\u2028"...)
+			} else if r == '\u2029' {
+				out = append(out, "\u2029"...)
+			} else {
+				out = append(out, s[i:i+size]...)
+			}
 			i += size - 1
 		}
 	}

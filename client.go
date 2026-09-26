@@ -37,10 +37,11 @@ type Client struct {
 	writeMu sync.Mutex
 	nextID  atomic.Uint64
 
-	mu      sync.Mutex
-	pending map[uint64]chan wire.Response
-	closed  chan struct{}
-	closeTx sync.Once
+	mu        sync.Mutex
+	pending   map[uint64]chan wire.Response
+	closed    chan struct{}
+	closeOnce sync.Once
+	closeTx   sync.Once
 }
 
 // Connect dials a hosted SuperDB server, performs HELLO + AUTH, and
@@ -215,13 +216,23 @@ func (c *Client) Rollback(ctx context.Context) error {
 func (c *Client) Close() error {
 	var err error
 	c.closeTx.Do(func() {
-		close(c.closed)
+		// Send the close frame before marking the client closed, otherwise
+		// roundTrip rejects the request and the server never sees it.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		_, _ = c.roundTrip(ctx, wire.TypeClose, []byte(`{}`))
-		err = c.conn.Close()
+		cancel()
+		c.markClosed()
+		if cerr := c.conn.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
+			err = cerr
+		}
 	})
 	return err
+}
+
+// markClosed flips the one-way closed latch exactly once. readLoop failures
+// and Close both funnel through it so later calls fail fast.
+func (c *Client) markClosed() {
+	c.closeOnce.Do(func() { close(c.closed) })
 }
 
 func (c *Client) roundTrip(ctx context.Context, msgType uint8, payload []byte) (wire.Response, error) {
@@ -258,9 +269,10 @@ func (c *Client) roundTrip(ctx context.Context, msgType uint8, payload []byte) (
 	select {
 	case <-ctx.Done():
 		return wire.Response{}, ctx.Err()
-	case <-c.closed:
-		return wire.Response{}, errors.New("client closed")
 	case resp := <-ch:
+		// There is no closed case here on purpose: any close path ends in
+		// conn.Close, which makes readLoop fail and failAll deliver a real
+		// error on this channel — better fidelity than "client closed".
 		if resp.RequestID != 0 && resp.RequestID != id {
 			return wire.Response{}, &ServerError{Code: ErrProtocol, Message: "request id mismatch"}
 		}
@@ -300,13 +312,17 @@ func (c *Client) readLoop() {
 
 func (c *Client) failAll(err error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for id, ch := range c.pending {
 		select {
 		case ch <- wire.Response{RequestID: id, Status: "error", ErrorCode: ErrProtocol, ErrorMessage: err.Error()}:
 		default:
 		}
 	}
+	c.mu.Unlock()
+	// Poison the connection so new calls fail fast instead of writing to a
+	// dead socket and hanging until their deadline.
+	c.markClosed()
+	_ = c.conn.Close()
 }
 
 func toServerError(r wire.Response) error {

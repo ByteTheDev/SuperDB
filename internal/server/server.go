@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -27,6 +29,13 @@ type HandleOptions struct {
 	// Multi-statement session transactions are rejected in this mode;
 	// use atomic batches instead.
 	Cluster ClusterExec
+	// Limits bounds per-request resource use (timeouts, result size,
+	// batch and transaction caps). Zero fields disable each cap.
+	Limits Limits
+	// Limiter applies MaxConnections/MaxInflightQueries admission control.
+	// It must be created once per listener (NewLimiter) and shared by
+	// every connection. Nil disables admission control.
+	Limiter *Limiter
 }
 
 // ClusterExec is the subset of cluster.Node used by SQL sessions.
@@ -51,9 +60,14 @@ func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, optio
 	}
 	r := bufio.NewReaderSize(c, 64<<10)
 	w := bufio.NewWriterSize(c, 64<<10)
-	s := &session{db: db, walWriter: options.WALWriter, cluster: options.Cluster}
+	if !options.Limiter.AcquireConn() {
+		_ = writeResponse(w, map[string]string{"error": "connection refused: server at connection limit"})
+		return
+	}
+	defer options.Limiter.ReleaseConn()
+	s := &session{db: db, walWriter: options.WALWriter, cluster: options.Cluster, limits: options.Limits, limiter: options.Limiter}
 	for {
-		q, err := readRequest(r)
+		q, err := readRequest(r, options.Limits.MaxRequestBytes)
 		if err != nil {
 			return
 		}
@@ -65,7 +79,7 @@ func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, optio
 			continue
 		}
 		out := executeRequest(q, s, mode, data)
-		if err := writeResponse(w, out); err != nil {
+		if err := writeResponseLimit(w, out, options.Limits.MaxResultBytes); err != nil {
 			return
 		}
 	}
@@ -79,6 +93,8 @@ type session struct {
 	pendingPersist []string
 	walWriter      *storage.WALWriter
 	cluster        ClusterExec
+	limits         Limits
+	limiter        *Limiter
 }
 
 func (s *session) active() *engine.Database {
@@ -89,9 +105,19 @@ func (s *session) active() *engine.Database {
 }
 
 func executeRequest(q request, s *session, mode, data string) any {
+	// Admission control: one inflight slot per request (a batch counts
+	// once). Waiting longer than AcquireTimeout fails fast with ErrBusy
+	// so an overloaded node sheds load instead of queueing unboundedly.
+	if err := s.limiter.AcquireQuery(context.Background()); err != nil {
+		return map[string]string{"error": err.Error()}
+	}
+	defer s.limiter.ReleaseQuery()
 	if len(q.SQLs) > 0 {
+		if lim := s.limits.MaxBatchStatements; lim > 0 && len(q.SQLs) > lim {
+			return map[string]string{"error": fmt.Sprintf("batch exceeds maximum of %d statements", lim)}
+		}
 		if q.Atomic && s.cluster != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := queryContext(s.limits)
 			defer cancel()
 			results, err := s.cluster.ExecAtomic(ctx, q.SQLs)
 			if err != nil {
@@ -99,9 +125,12 @@ func executeRequest(q request, s *session, mode, data string) any {
 			}
 			out := make([]any, 0, len(results))
 			for _, r := range results {
-				out = append(out, r)
+				out = append(out, capResultRows(r, s.limits))
 			}
 			return out
+		}
+		if q.Atomic {
+			return executeAtomicBatch(q.SQLs, s, mode, data)
 		}
 		s.batch = true
 		s.pendingPersist = nil
@@ -119,24 +148,75 @@ func executeRequest(q request, s *session, mode, data string) any {
 	return executeSQL(q.SQL, s, mode, data)
 }
 
+// executeAtomicBatch runs a local "sqls"+"atomic" request with real
+// atomicity: statements execute against a private clone, and the image is
+// published via CommitFrom only when every statement succeeds and no other
+// writer committed in between. On failure nothing is applied — the same
+// all-or-nothing semantics the cluster path gets from Raft.
+func executeAtomicBatch(sqls []string, s *session, mode, data string) any {
+	if s.tx != nil {
+		return map[string]string{"error": "atomic batch not allowed inside a transaction"}
+	}
+	clone, err := s.db.Clone()
+	if err != nil {
+		return map[string]string{"error": "batch: " + err.Error()}
+	}
+	out := make([]any, 0, len(sqls))
+	var writes []string
+	for i, sql := range sqls {
+		ctx, cancel := queryContext(s.limits)
+		res, err := clone.ExecWithOptions(ctx, sql, engine.ExecOptions{MaxRows: s.limits.MaxResultRows})
+		cancel()
+		if err != nil {
+			return map[string]string{"error": fmt.Sprintf("statement %d: %s", i+1, execErrorMessage(err))}
+		}
+		if isWriteSQL(sql) {
+			writes = append(writes, sql)
+		}
+		out = append(out, res)
+	}
+	if err := s.db.CommitFrom(clone, func(img *engine.Database) error {
+		return persistStatements(mode, data, writes, img, s.walWriter)
+	}); err != nil {
+		return map[string]string{"error": "batch commit: " + err.Error()}
+	}
+	return out
+}
+
+// queryContext applies the per-statement timeout. Zero leaves execution
+// unbounded. WithTimeout cancels synchronously when the deadline has
+// already passed, so an already-expired timeout is honored even before
+// the engine begins work.
+func queryContext(l Limits) (context.Context, context.CancelFunc) {
+	if l.QueryTimeout == 0 {
+		return context.Background(), func() {}
+	}
+	return context.WithTimeout(context.Background(), l.QueryTimeout)
+}
+
 func executeSQL(raw string, s *session, mode, data string) any {
 	if s.cluster != nil {
 		trimmed := strings.TrimSpace(raw)
 		if equalFold(trimmed, "BEGIN") || equalFold(trimmed, "COMMIT") || equalFold(trimmed, "ROLLBACK") {
 			return map[string]string{"error": "session transactions are not supported in cluster mode; send atomic batches instead"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := queryContext(s.limits)
 		defer cancel()
 		res, err := s.cluster.Exec(ctx, raw)
 		if err != nil {
 			return map[string]string{"error": err.Error()}
 		}
-		return res
+		return capResultRows(res, s.limits)
 	}
 	sql := strings.TrimSpace(raw)
 	if equalFold(sql, "BEGIN") {
 		if s.tx != nil {
 			return map[string]string{"error": "transaction already active"}
+		}
+		// A session transaction clones the whole database; reject BEGIN
+		// beyond the row budget so one connection cannot pin a huge copy.
+		if lim := s.limits.MaxTxDatabaseRows; lim > 0 && s.db.RowCount() > lim {
+			return map[string]string{"error": fmt.Sprintf("transaction rejected: database holds %d rows (limit %d)", s.db.RowCount(), lim)}
 		}
 		clone, err := s.db.Clone()
 		if err != nil {
@@ -176,13 +256,22 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		s.txSQL = nil
 		return map[string]string{"message": "COMMIT ok"}
 	}
+	ctx, cancel := queryContext(s.limits)
+	defer cancel()
 	db := s.active()
-	res, err := db.Exec(raw)
+	res, err := db.ExecWithOptions(ctx, raw, engine.ExecOptions{MaxRows: s.limits.MaxResultRows})
 	if err != nil {
-		return map[string]string{"error": err.Error()}
+		return map[string]string{"error": execErrorMessage(err)}
 	}
 	if s.tx != nil {
 		if isWriteSQL(raw) {
+			if lim := s.limits.MaxTxStatements; lim > 0 && len(s.txSQL) >= lim {
+				// Aborting frees the session clone, the dominant
+				// per-connection memory cost of an oversized tx.
+				s.tx = nil
+				s.txSQL = nil
+				return map[string]string{"error": fmt.Sprintf("transaction aborted: exceeded %d buffered statements", lim)}
+			}
 			s.txSQL = append(s.txSQL, raw)
 		}
 	} else if s.batch {
@@ -195,6 +284,29 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		}
 	}
 	return res
+}
+
+// capResultRows enforces Limits.MaxResultRows on results produced outside
+// the local engine path (cluster execs cannot carry ExecOptions through
+// deterministic Raft apply). Local statements are already capped inside
+// the engine, so this is a second, cheap boundary check.
+func capResultRows(res engine.Result, l Limits) any {
+	if l.MaxResultRows > 0 && len(res.Rows) > l.MaxResultRows {
+		return map[string]string{"error": fmt.Sprintf("result row limit exceeded: %d rows (limit %d)", len(res.Rows), l.MaxResultRows)}
+	}
+	return res
+}
+
+// execErrorMessage maps context failures to stable client-facing text.
+func execErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "query timeout exceeded"
+	case errors.Is(err, context.Canceled):
+		return "query canceled"
+	default:
+		return err.Error()
+	}
 }
 
 // checkAuth reports whether the supplied key satisfies the required key.

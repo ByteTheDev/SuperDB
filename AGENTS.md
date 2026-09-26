@@ -26,9 +26,11 @@ internal/engine/insert.go        INSERT
 internal/engine/select.go        SELECT, filters, ordering, limits, aggregates
 internal/engine/update.go        UPDATE
 internal/engine/delete.go        DELETE
+internal/engine/cancel.go        Per-statement cancellation checks in scan loops
 internal/engine/snapshot.go      JSON snapshot serialization
 internal/server/server.go        TCP lifecycle and SQL sessions
 internal/server/protocol.go      Length-prefixed JSON protocol
+internal/server/limits.go        Limits config + Limiter admission control
 internal/server/persistence.go   Snapshot/WAL loading and persistence
 internal/server/backups.go       Timestamped backups and recovery
 internal/server/cluster.go       Bridge: start cluster node around local engine
@@ -46,7 +48,7 @@ internal/cluster/replication.go  RaftReplicator/WriteConcern (quorum-enforced)
 internal/cluster/stats.go        Atomic observability counters
 internal/cluster/errors.go       Structured cluster errors
 internal/wire/wire.go            SDB1 framed protocol (magic/version/type/reqID/len + JSON)
-internal/remote/config.go        Hosted server config, env vars, constant-time auth
+internal/remote/config.go        Hosted server config, env vars, limits, constant-time auth
 internal/remote/metrics.go       Atomic server observability counters
 internal/remote/server.go        Hosted TCP/TLS server, graceful shutdown, cluster routing
 internal/remote/session.go       Per-connection session/tx over existing engine APIs
@@ -132,6 +134,8 @@ Shared flags:
 
 Server-only flags include `--profile standard|production`, `--production`, `--backup-dir DIR`, `--backup-interval DURATION`, `--cluster-addr` (alias `--listen`), `--advertise`, `--join`, and `--region`. Cluster mode is off unless `--cluster-addr` is set; see `docs/cluster.md`. Cluster mode runs hashicorp/raft (new `go.mod` deps); session transactions are rejected there in favor of atomic batches.
 
+Safety-limit flags on `server` (all default to disabled): `--query-timeout`, `--max-result-rows`, `--max-result-bytes`, `--max-inflight-queries`, `--query-queue-timeout`, `--max-connections`, `--max-batch-statements`, `--max-tx-statements`, `--max-tx-database-rows`, `--max-request-bytes`. `serve` exposes the same set minus connection/batch/request caps (already covered by `MaxConnections` and frame size) plus `SUPERDB_*` env vars; see `docs/hosted.md`.
+
 `status` reports configured values and local snapshot/WAL file sizes. `backup` copies active `.spdb` files. `restore` copies them into the data directory. `recover` validates and restores the newest timestamped snapshot backup. `compact` rewrites a snapshot from the loaded snapshot state.
 
 Client examples:
@@ -169,12 +173,15 @@ Types are `INT`, `FLOAT`, `TEXT`, and `BOOL`. JSON decoding can turn numbers int
 
 Important behavior:
 
-- Primary keys use direct lookup fast paths.
+- Primary keys use direct lookup fast paths. Tables without a PRIMARY KEY insert rows under synthetic `#N` keys (in-memory counter; restored tables skip collisions) and keep insertion order.
 - Secondary indexes must stay correct after insert, update, delete, clone, and replace.
-- WHERE, ordering, limits, aggregates, and logical predicates are only the implemented subset of SQL.
+- WHERE, ordering, limits, aggregates, and logical predicates are only the implemented subset of SQL. WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=` combined with AND/OR; ordered comparisons use the column's declared type. Single quotes inside literals escape as `''` and are decoded on parse (BindParams round-trips them).
+- Predicates, ORDER BY columns, and aggregate arguments must reference real columns; unknown columns are errors on every path (SELECT, UPDATE, DELETE, aggregates).
+- SELECT clause order is WHERE, ORDER BY, LIMIT; reject empty WHERE clauses and misordered clauses without panicking. Keyword searches must skip quoted literals and identifier substrings.
+- Ordered predicates must agree across small-table, large-table, and indexed paths. MIN/MAX compare numeric values numerically; integer sorting preserves int64 precision. COUNT(column) excludes NULL; COUNT(*) counts all matching rows.
 - Transactions are session-local clones until COMMIT.
 - WAL records mutating SQL, not reads.
-- Batches execute and return results in order.
+- Batches execute and return results in order. `{"sqls":[...],"atomic":true}` is all-or-nothing locally too (clone + CommitFrom, persist-before-publish); it is rejected inside an open session transaction.
 
 Before adding SQL, inspect existing parser helpers and add tests for valid syntax, invalid syntax, type conversion, indexes, and persistence/replay.
 
@@ -194,9 +201,13 @@ Requests:
 {"sqls":["INSERT INTO users VALUES (1, 'Ada')","SELECT * FROM users"]}
 ```
 
-Responses use the same length prefix and JSON. Successful responses are engine `Result` values; errors contain an `error` string. Requests are limited to 16 MiB.
+Responses use the same length prefix and JSON. Successful responses are engine `Result` values; errors contain an `error` string. Requests are limited to 16 MiB (`Limits.MaxRequestBytes` adjusts it). `Limits.MaxResultBytes` replaces oversized responses with an error.
 
 Do not silently change framing, field names, or response ordering. Change client and server together and add protocol tests. TCP_NODELAY, socket buffers, and buffered writes are intentional performance behavior.
+
+## Safety limits
+
+`server.Limits` (internal/server/limits.go) is shared by the local TCP server and the hosted `remote` server. `server.Limiter` enforces `MaxConnections` and `MaxInflightQueries` admission control; over-cap queries wait up to `AcquireTimeout` (default 5s) then fail fast. The engine takes `context.Context` plus `ExecOptions` (`ExecContext`/`ExecWithOptions`): scan loops poll cancellation every 64 rows via `rowTicker`, and `MaxRows` caps emitted rows at `maxRows+1` so over-cap results abort with `ErrResultTooLarge` instead of buffering unbounded output. Session transactions are bounded by `MaxTxStatements` (overflow aborts and frees the clone) and `MaxTxDatabaseRows` (rejects `BEGIN` when `Database.RowCount` exceeds it). Hosted-protocol limit errors map to `TIMEOUT`, `SERVER_BUSY` (retryable), and `RESULT_TOO_LARGE`.
 
 ## Storage format
 
@@ -234,6 +245,11 @@ Automatic backups use `--backup-dir` and `--backup-interval`. Recovery validates
 
 The database and tables use locks. The server uses one goroutine per TCP connection. Transactions clone and replace database state. Do not hold database locks while doing slow network or filesystem work. Run race tests for locking, transactions, indexes, and server changes.
 
+Cluster leaders finish a Raft barrier before Start returns so committed rows are
+available after snapshot/log recovery. Genesis creation also waits for replay
+before deciding whether an initial range is missing. Follower local reads remain
+relaxed; callers requiring linearizable reads must use the consistent-read API.
+
 ## Performance
 
 Existing performance features include batched requests, TCP_NODELAY, larger buffers, buffered writes, primary-key lookup, secondary indexes, optimized WAL writing, and a production profile.
@@ -261,11 +277,11 @@ After editing, run formatting, tests, vet, build, race tests when relevant, benc
 
 ## Known limitations and roadmap
 
-Not yet implemented: authentication, authorization, TLS, sharded storage, auto-splitting, cross-shard transactions, Prometheus metrics, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Raft quorum writes/failover, range split/move/assign, atomic batches, and region placement exist (all voters hold all data); see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check.
+Not yet implemented: authorization, sharded storage, auto-splitting, cross-shard transactions, Prometheus metrics, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Raft quorum writes/failover, range split/move/assign, atomic batches, and region placement exist (all voters hold all data); see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check. Access keys (local `--auth-key`), username/password auth and TLS (`serve`), and connection/query safety limits exist; see "Safety limits".
 
 Recommended priorities:
 
-1. Authentication, TLS, connection/query limits.
+1. Local-server TLS and stronger authorization.
 2. Checksums and stronger backup verification.
 3. Prepared statements and streaming result sets.
 4. Proper interactive SQL shell.

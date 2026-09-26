@@ -136,6 +136,16 @@ func runServer(args []string, globalProduction bool) {
 	join := fs.String("join", "", "comma-separated seed cluster address(es) to join")
 	region := fs.String("region", "", "region label for placement (optional)")
 	authKey := fs.String("auth-key", "", "require this access key on every client request (or SUPERDB_AUTH_KEY)")
+	queryTimeout := fs.Duration("query-timeout", 0, "per-statement timeout (0 disables)")
+	maxResultRows := fs.Int("max-result-rows", 0, "max rows a SELECT may return (0 disables)")
+	maxResultBytes := fs.Int("max-result-bytes", 0, "max encoded response bytes per request (0 disables)")
+	maxInflight := fs.Int("max-inflight-queries", 0, "max concurrent requests across all connections (0 disables)")
+	queueTimeout := fs.Duration("query-queue-timeout", 0, "max wait for an inflight slot before rejecting (default 5s)")
+	maxConns := fs.Int("max-connections", 0, "max concurrent client connections (0 disables)")
+	maxBatch := fs.Int("max-batch-statements", 0, "max statements per batch request (0 disables)")
+	maxTxStmts := fs.Int("max-tx-statements", 0, "max buffered statements per session transaction (0 disables)")
+	maxTxRows := fs.Int("max-tx-database-rows", 0, "reject BEGIN when the database exceeds this many rows (0 disables)")
+	maxReqBytes := fs.Int("max-request-bytes", 0, "max request payload bytes (default 16 MiB)")
 	fs.Parse(args)
 	if *authKey == "" {
 		*authKey = os.Getenv("SUPERDB_AUTH_KEY")
@@ -208,6 +218,13 @@ func runServer(args []string, globalProduction bool) {
 	} else {
 		log.Printf("SuperDB listening on %s mode=%s data=%s auth=disabled", *addr, *mode, *data)
 	}
+	limits := server.Limits{
+		QueryTimeout: *queryTimeout, MaxResultRows: *maxResultRows, MaxResultBytes: *maxResultBytes,
+		MaxInflightQueries: *maxInflight, AcquireTimeout: *queueTimeout, MaxConnections: *maxConns,
+		MaxBatchStatements: *maxBatch, MaxTxStatements: *maxTxStmts, MaxTxDatabaseRows: *maxTxRows,
+		MaxRequestBytes: *maxReqBytes,
+	}
+	limiter := server.NewLimiter(limits)
 	ln, e := net.Listen("tcp", *addr)
 	if e != nil {
 		log.Fatal(e)
@@ -219,7 +236,7 @@ func runServer(args []string, globalProduction bool) {
 			log.Print(e)
 			continue
 		}
-		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter, Cluster: clusterExec, AuthKey: *authKey})
+		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter, Cluster: clusterExec, AuthKey: *authKey, Limits: limits, Limiter: limiter})
 	}
 }
 
@@ -250,6 +267,13 @@ func runServe(args []string) {
 	advertise := fs.String("advertise", "", "advertised cluster address (defaults to --cluster-addr)")
 	join := fs.String("join", "", "comma-separated seed cluster address(es) to join")
 	region := fs.String("region", "", "region label for placement (optional)")
+	queryTimeout := fs.Duration("query-timeout", 0, "per-statement timeout (SUPERDB_QUERY_TIMEOUT)")
+	maxResultRows := fs.Int("max-result-rows", 0, "max rows a query may return (SUPERDB_MAX_RESULT_ROWS)")
+	maxResultBytes := fs.Int("max-result-bytes", 0, "max encoded result bytes (SUPERDB_MAX_RESULT_BYTES)")
+	maxInflight := fs.Int("max-inflight-queries", 0, "max concurrent queries (SUPERDB_MAX_INFLIGHT_QUERIES)")
+	queueTimeout := fs.Duration("query-queue-timeout", 0, "max wait for a query slot (SUPERDB_QUERY_QUEUE_TIMEOUT)")
+	maxTxStmts := fs.Int("max-tx-statements", 0, "max buffered statements per session transaction (SUPERDB_MAX_TX_STATEMENTS)")
+	maxTxRows := fs.Int("max-tx-database-rows", 0, "reject BEGIN when the database exceeds this many rows (SUPERDB_MAX_TX_DATABASE_ROWS)")
 	fs.Parse(args)
 	cfg := remote.LoadConfig(remote.Config{
 		Host: *host, Port: *port, DataDir: *data, Mode: *mode,
@@ -257,6 +281,11 @@ func runServe(args []string) {
 		TLSCertFile: *tlsCert, TLSKeyFile: *tlsKey,
 		MaxConnections: *maxConns, HealthAddr: *healthAddr,
 		ClusterAddr: *clusterAddr, AdvertiseAddr: *advertise, Region: *region,
+		Limits: server.Limits{
+			QueryTimeout: *queryTimeout, MaxResultRows: *maxResultRows, MaxResultBytes: *maxResultBytes,
+			MaxInflightQueries: *maxInflight, AcquireTimeout: *queueTimeout,
+			MaxTxStatements: *maxTxStmts, MaxTxDatabaseRows: *maxTxRows,
+		},
 	})
 	if *join != "" {
 		for _, s := range strings.Split(*join, ",") {

@@ -106,6 +106,21 @@ client with `--auth-key` (or `SUPERDB_AUTH_KEY`). Without the correct key the
 server returns an `unauthorized` error and runs no SQL. When no key is
 configured, authentication is disabled for backward compatibility.
 
+Connection and query safety limits are available on both servers:
+
+```bash
+go run ./cmd/superdb server --query-timeout 10s --max-result-rows 100000 \
+    --max-result-bytes 33554432 --max-inflight-queries 64 --max-connections 512
+```
+
+Additional caps: `--query-queue-timeout` (wait for an inflight slot before
+rejecting, default 5s), `--max-batch-statements`, `--max-tx-statements`
+(abort oversized session transactions), `--max-tx-database-rows` (reject
+`BEGIN` when the database is too large to clone safely), and
+`--max-request-bytes` (default 16 MiB). Every limit defaults to disabled.
+The `serve` command exposes the same limits as flags and `SUPERDB_*`
+environment variables; see [docs/hosted.md](docs/hosted.md).
+
 ### Developer commands
 
 Run `go run ./cmd/superdb` with no command to open the interactive menu. Every menu action is also available directly:
@@ -144,3 +159,28 @@ See [docs/cluster.md](docs/cluster.md) for the honest implemented-vs-planned spl
 `CREATE TABLE`, `INSERT`, `SELECT`, `UPDATE`, `DELETE`, `BEGIN`, `COMMIT`, and `ROLLBACK`.
 
 The v1 query engine intentionally focuses on primary-key equality and simple literal filters.
+
+WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, and `>=` across SELECT,
+UPDATE, DELETE, and aggregate queries, combined with `AND`/`OR`. Ordered
+comparisons use each column's declared type (INT/FLOAT numerically, TEXT
+lexically). Predicates on unknown columns, unknown `ORDER BY` columns, and
+aggregates over unknown columns return errors instead of silently matching
+nothing. Single quotes inside text literals escape as `''`. Tables may omit
+`PRIMARY KEY`; such tables insert rows under synthetic keys and preserve
+insertion order.
+
+SELECT clauses follow `WHERE`, `ORDER BY`, then `LIMIT`; empty predicates and
+misordered clauses return errors. Clause keywords inside text literals or longer
+identifiers are not treated as SQL syntax. Numeric `MIN`/`MAX` and integer sorting
+use numeric order without losing integer precision. `COUNT(column)` excludes
+NULL values, while `COUNT(*)` includes every matching row. Ordered filters work
+with both small tables and the large-table fast path.
+
+Batch requests (`{"sqls": [...]}`) run each statement in order. Adding
+`"atomic": true` makes the batch all-or-nothing in both local and cluster
+modes: statements run against a private snapshot and publish only if every
+one succeeds and no other writer committed meanwhile.
+
+On cluster leader startup, SuperDB waits for committed log replay before
+returning, including entries written after the restored snapshot. Follower local
+reads retain their existing relaxed consistency; use consistent reads when needed.

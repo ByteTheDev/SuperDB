@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.1 — Query safety limits (2026-09-22)
+
+- Add configurable query timeouts, result row and byte caps, request and batch
+  limits, and connection and inflight-query admission control.
+- Bound session transaction size and database row counts before cloning.
+- Add hosted-server flags and environment variables for the applicable limits.
+- Fix cluster recovery ordering and SQL keyword and query regressions.
+
 ## v0.4.0 — Hosted access and authentication (2026-09-20)
 
 SuperDB gains remote access and access control while local mode stays

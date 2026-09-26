@@ -1,5 +1,7 @@
 package engine
 
+import "strconv"
+
 const fastPathThreshold = 256
 
 type fastRow struct {
@@ -71,20 +73,6 @@ func (t *Table) removeFastRowLocked(key string) {
 	}
 }
 
-// removeFromOrderLocked removes key from Order while preserving scan order.
-// Primary-key deletes use this so a later reinsert of the same key cannot
-// leave a duplicate Order entry that would double-count the row.
-func (t *Table) removeFromOrderLocked(key string) {
-	for i, k := range t.Order {
-		if k == key {
-			copy(t.Order[i:], t.Order[i+1:])
-			t.Order[len(t.Order)-1] = ""
-			t.Order = t.Order[:len(t.Order)-1]
-			break
-		}
-	}
-}
-
 // compactOrderLocked reaps stale Order keys left behind by primary-key
 // deletes and rebuilds the fast path when tombstones accumulate. Scans
 // already skip missing keys, so compaction only bounds memory and keeps
@@ -112,6 +100,21 @@ func (t *Table) compactOrderLocked() {
 	t.dead = 0
 	if len(t.fast) > 0 {
 		t.rebuildFastPathLocked()
+	}
+}
+
+// nextSyntheticKeyLocked assigns a row key for tables without a primary
+// key. The "#" prefix can never collide with a typed key from valueKey
+// (INT/FLOAT/BOOL keys render digits or words, TEXT keys keep quotes).
+// autoKey is in-memory only; collisions with keys restored from a snapshot
+// are skipped by the existence check.
+func (t *Table) nextSyntheticKeyLocked() string {
+	for {
+		key := "#" + strconv.FormatUint(t.autoKey, 10)
+		t.autoKey++
+		if _, exists := t.Rows[key]; !exists {
+			return key
+		}
 	}
 }
 

@@ -65,6 +65,35 @@ func indexFold(s, sub string) int {
 	return -1
 }
 
+// indexKeyword finds a complete SQL keyword outside quoted text. Unlike
+// indexFold, it cannot mistake part of an identifier or a literal for a clause.
+func indexKeyword(s, keyword string) int {
+	quoted := false
+	for i := 0; i+len(keyword) <= len(s); i++ {
+		if s[i] == '\'' {
+			if quoted && i+1 < len(s) && s[i+1] == '\'' {
+				i++
+				continue
+			}
+			quoted = !quoted
+			continue
+		}
+		if quoted || (i > 0 && identifierByte(s[i-1])) {
+			continue
+		}
+		end := i + len(keyword)
+		if foldEqualAt(s[i:], keyword) && (end == len(s) || !identifierByte(s[end])) {
+			return i
+		}
+	}
+	return -1
+}
+
+func identifierByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c == '_' || c >= 0x80
+}
+
 // firstField returns the first whitespace-delimited token of s, mirroring
 // strings.Fields(s)[0] without splitting the whole string.
 func firstField(s string) (string, bool) {

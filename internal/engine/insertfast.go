@@ -24,6 +24,7 @@ func parseInsertRowsFast(raw string, columns []Column) ([]insertRow, error) {
 	rows := []insertRow(nil)
 	var seen map[string]struct{}
 	var spans []span
+	hasPrimary := hasPrimaryColumn(columns)
 	depth := 0
 	rowStart := -1
 	valStart := -1
@@ -46,10 +47,10 @@ func parseInsertRowsFast(raw string, columns []Column) ([]insertRow, error) {
 				key = valueKey(v)
 			}
 		}
-		if key == "" {
+		if key == "" && hasPrimary {
 			return errors.New("primary key required")
 		}
-		if len(rows) >= 1 {
+		if key != "" && len(rows) >= 1 {
 			if seen == nil {
 				seen = make(map[string]struct{}, 4)
 				for _, previous := range rows {
@@ -68,6 +69,10 @@ func parseInsertRowsFast(raw string, columns []Column) ([]insertRow, error) {
 	for i := 0; i < len(payload); i++ {
 		c := payload[i]
 		if c == '\'' {
+			if ni, skip := skipQuoted(payload, i, quote); skip {
+				i = ni
+				continue
+			}
 			quote = !quote
 			continue
 		}

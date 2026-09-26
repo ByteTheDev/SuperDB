@@ -1,21 +1,24 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 )
 
-func (d *Database) createIndex(s string) (Result, error) {
-	upper := strings.ToUpper(s)
-	on := strings.Index(upper, " ON ")
+func (d *Database) createIndex(ctx context.Context, s string) (Result, error) {
+	// Locate the ON keyword on the original string: indexing an uppercased
+	// copy is unsound because ToUpper can change byte length for some
+	// runes (e.g. 'ſ'), corrupting the substrings.
+	on := indexKeyword(s, "ON")
 	open, close := strings.Index(s, "("), strings.LastIndex(s, ")")
 	if on < 0 || open < 0 || close <= open {
 		return Result{}, errors.New("invalid CREATE INDEX")
 	}
 	indexName := strings.TrimSpace(s[len("CREATE INDEX"):on])
-	tableName := strings.TrimSpace(s[on+4 : open])
+	tableName := strings.TrimSpace(s[on+2 : open])
 	column := strings.ToLower(strings.TrimSpace(s[open+1 : close]))
 	if indexName == "" || tableName == "" || column == "" || strings.Contains(column, ",") {
 		return Result{}, errors.New("invalid CREATE INDEX")
@@ -36,7 +39,11 @@ func (d *Database) createIndex(s string) (Result, error) {
 		return Result{}, errors.New("index already exists for column")
 	}
 	index := make(map[string]map[string]struct{})
+	tick := &rowTicker{}
 	for key, row := range t.Rows {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		value := valueKey(row[column])
 		if index[value] == nil {
 			index[value] = make(map[string]struct{})
@@ -67,7 +74,7 @@ func valueKey(value any) string {
 	}
 }
 
-func (d *Database) alterTable(s string) (Result, error) {
+func (d *Database) alterTable(ctx context.Context, s string) (Result, error) {
 	parts := strings.Fields(s)
 	if len(parts) != 7 || !strings.EqualFold(parts[3], "ADD") || !strings.EqualFold(parts[4], "COLUMN") {
 		return Result{}, errors.New("only ALTER TABLE ... ADD COLUMN is supported")
@@ -87,13 +94,26 @@ func (d *Database) alterTable(s string) (Result, error) {
 		return Result{}, errors.New("column already exists")
 	}
 	t.Columns = append(t.Columns, Column{Name: column, Type: typ})
+	tick := &rowTicker{}
 	for _, row := range t.Rows {
+		if err := tick.tick(ctx); err != nil {
+			return Result{}, err
+		}
 		row[column] = nil
 	}
 	if len(t.fast) > 0 {
 		t.rebuildFastPathLocked()
 	}
 	return Result{Message: "column added"}, nil
+}
+
+func hasPrimaryColumn(columns []Column) bool {
+	for _, column := range columns {
+		if column.Primary {
+			return true
+		}
+	}
+	return false
 }
 
 func hasColumn(columns []Column, name string) bool {

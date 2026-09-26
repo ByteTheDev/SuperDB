@@ -232,7 +232,19 @@ func (n *Node) Start(ctx context.Context) error {
 		n.observeLoop(nctx)
 	}()
 	if bootstrapped && len(n.cfg.JoinAddrs) == 0 {
-		_ = n.waitLeader(10 * time.Second)
+		if err := n.waitLeader(10 * time.Second); err != nil {
+			n.stop()
+			return err
+		}
+	}
+	// Leadership and a restored genesis range can be visible before the FSM
+	// has replayed the remaining committed entries. A leader barrier waits
+	// for those entries before callers can read the recovered engine.
+	if n.rn.IsLeader() {
+		if err := n.rn.Barrier(barrierTimeout(ctx, 10*time.Second)); err != nil {
+			n.stop()
+			return err
+		}
 	}
 	return nil
 }
@@ -251,6 +263,14 @@ func (n *Node) ensureGenesis(ctx context.Context) error {
 			return nil
 		}
 		if n.rn.IsLeader() {
+			// Replay may already contain genesis. Finish applying prior logs
+			// before deciding whether to propose another initial range.
+			if err := n.rn.Barrier(barrierTimeout(ctx, 10*time.Second)); err != nil {
+				return err
+			}
+			if len(n.ranges.All()) > 0 {
+				return nil
+			}
 			genesis := &RangeOp{Type: RangeOpSplit, Ranges: []Range{{
 				ID: 1, StartKey: "", EndKey: "",
 				Replicas: []string{n.identity.NodeID}, Leader: n.identity.NodeID, Generation: 1,
@@ -422,8 +442,26 @@ func (n *Node) forwardRemove(ctx context.Context, addr, id string) error {
 // --- write / read paths ---
 
 func isRead(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	return strings.HasPrefix(upper, "SELECT")
+	return sqlKeywordIs(sql, "SELECT")
+}
+
+// sqlKeywordIs reports whether the first keyword of sql equals keyword
+// (ASCII case-insensitive) without allocating an uppercased copy.
+func sqlKeywordIs(sql, keyword string) bool {
+	s := strings.TrimSpace(sql)
+	if len(s) < len(keyword) {
+		return false
+	}
+	for i := 0; i < len(keyword); i++ {
+		c := s[i]
+		if 'a' <= c && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c != keyword[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Exec routes one statement: writes commit through Raft quorum on the
@@ -557,9 +595,7 @@ func (n *Node) writeCommitted(ctx context.Context, sqls []string, atomic bool, r
 func (n *Node) resultFor(result *EntryResult, sqls []string) (engine.Result, error) {
 	if len(sqls) == 1 && !isRead(sqls[0]) {
 		// Return the engine-shaped result for single writes.
-		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sqls[0])), "INSERT") ||
-			strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sqls[0])), "UPDATE") ||
-			strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sqls[0])), "DELETE") {
+		if sqlKeywordIs(sqls[0], "INSERT") || sqlKeywordIs(sqls[0], "UPDATE") || sqlKeywordIs(sqls[0], "DELETE") {
 			return engine.Result{Affected: result.Affected}, nil
 		}
 		return engine.Result{Message: "ok"}, nil

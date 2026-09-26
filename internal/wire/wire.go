@@ -64,6 +64,10 @@ const (
 	ErrUnsupported    = "UNSUPPORTED"
 	ErrInternal       = "INTERNAL_ERROR"
 	ErrProtocol       = "PROTOCOL_ERROR"
+	// ErrBusy marks retryable admission rejections (MaxInflightQueries).
+	ErrBusy = "SERVER_BUSY"
+	// ErrResultTooLarge marks MaxResultRows/MaxResultBytes violations.
+	ErrResultTooLarge = "RESULT_TOO_LARGE"
 )
 
 // Request payloads (JSON).
