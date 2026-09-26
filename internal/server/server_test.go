@@ -63,6 +63,59 @@ func TestClusterAtomicBatch(t *testing.T) {
 	}
 }
 
+func TestLocalAtomicBatch(t *testing.T) {
+	db := engine.New()
+	s := &session{db: db}
+	out := executeRequest(request{SQLs: []string{
+		"CREATE TABLE t (id INT PRIMARY KEY)",
+		"INSERT INTO t VALUES (1)",
+		"INSERT INTO t VALUES (2)",
+	}, Atomic: true}, s, "memory", t.TempDir())
+	results, ok := out.([]any)
+	if !ok || len(results) != 3 {
+		t.Fatalf("atomic batch results: %#v", out)
+	}
+	r, err := db.Exec("SELECT COUNT(*) FROM t")
+	if err != nil || r.Rows[0][0] != 2 {
+		t.Fatalf("atomic batch not applied: %+v %v", r, err)
+	}
+}
+
+func TestLocalAtomicBatchRollsBackOnFailure(t *testing.T) {
+	db := engine.New()
+	if _, err := db.Exec("CREATE TABLE t (id INT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	s := &session{db: db}
+	out := executeRequest(request{SQLs: []string{
+		"INSERT INTO t VALUES (1)",
+		"INSERT INTO t VALUES (1)", // duplicate primary key: must fail
+		"INSERT INTO t VALUES (3)",
+	}, Atomic: true}, s, "memory", t.TempDir())
+	m, ok := out.(map[string]string)
+	if !ok || m["error"] == "" {
+		t.Fatalf("atomic batch failure must surface: %#v", out)
+	}
+	r, err := db.Exec("SELECT COUNT(*) FROM t")
+	if err != nil || r.Rows[0][0] != 0 {
+		t.Fatalf("atomic batch partially applied: %+v %v", r, err)
+	}
+}
+
+func TestLocalAtomicBatchRejectsInsideTransaction(t *testing.T) {
+	db := engine.New()
+	s := &session{db: db}
+	out := executeSQL("BEGIN", s, "memory", t.TempDir())
+	if m, ok := out.(map[string]string); !ok || m["error"] != "" {
+		t.Fatalf("BEGIN failed: %#v", out)
+	}
+	out = executeRequest(request{SQLs: []string{"SELECT 1"}, Atomic: true}, s, "memory", t.TempDir())
+	m, ok := out.(map[string]string)
+	if !ok || m["error"] == "" {
+		t.Fatalf("atomic batch inside tx must be rejected: %#v", out)
+	}
+}
+
 func TestClusterRejectsTransactions(t *testing.T) {
 	stub := &stubCluster{db: engine.New()}
 	s := &session{db: stub.db, cluster: stub}

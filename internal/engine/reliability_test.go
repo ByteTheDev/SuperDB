@@ -45,7 +45,15 @@ func TestDeletedRowsStayDeleted(t *testing.T) {
 }
 
 func TestInvalidMutationDoesNotChangeRows(t *testing.T) {
-	for _, q := range []string{"DELETE FROM t WHERE id > 1", "DELETE FROM t WHERE", "UPDATE t SET v = 9 WHERE id > 1", "UPDATE t SET v = 9 WHERE"} {
+	for _, q := range []string{
+		"DELETE FROM t WHERE",
+		"DELETE FROM t WHERE id >",
+		"DELETE FROM t WHERE id ! 1",
+		"DELETE FROM t WHERE nope = 1",
+		"UPDATE t SET v = 9 WHERE",
+		"UPDATE t SET v = 9 WHERE id >",
+		"UPDATE t SET v = 9 WHERE nope = 1",
+	} {
 		t.Run(q, func(t *testing.T) {
 			d := New()
 			d.Exec("CREATE TABLE t (id INT PRIMARY KEY, v INT)")

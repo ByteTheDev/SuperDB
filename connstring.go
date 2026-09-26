@@ -68,26 +68,20 @@ func ParseURL(raw string) (ConnConfig, error) {
 		return cfg, fmt.Errorf("connection string requires a host")
 	}
 	cfg.Host = host
+	// url.Parse already percent-decodes the userinfo and path exactly once;
+	// decoding again would corrupt values that legitimately contain %XX
+	// (e.g. a password encoded as %2520 -> "%20" -> " ").
 	if u.User != nil {
 		if name := u.User.Username(); name != "" {
-			if decoded, err := url.PathUnescape(name); err == nil {
-				name = decoded
-			}
 			cfg.Username = name
 		}
 		if pw, ok := u.User.Password(); ok {
-			if decoded, err := url.PathUnescape(pw); err == nil {
-				pw = decoded
-			}
 			cfg.Password = pw
 		}
 	}
 	if strings.Trim(u.Path, "/") != "" {
 		db := strings.TrimPrefix(u.Path, "/")
 		db = strings.SplitN(db, "/", 2)[0]
-		if decoded, err := url.PathUnescape(db); err == nil {
-			db = decoded
-		}
 		if db != "" {
 			cfg.Database = db
 		}

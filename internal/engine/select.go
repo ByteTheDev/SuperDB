@@ -40,6 +40,9 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 	if err != nil {
 		return Result{}, err
 	}
+	if orderColumn != "" && !hasColumn(t.Columns, orderColumn) {
+		return Result{}, fmt.Errorf("ORDER BY column not found: %s", orderColumn)
+	}
 	if isAggregate(selectExpr) {
 		return aggregateResult(ctx, t, selectExpr, where)
 	}
@@ -303,7 +306,7 @@ func simpleEquality(expression string) (column, value string, ok bool) {
 	if len(parts) != 2 {
 		return "", "", false
 	}
-	return strings.ToLower(strings.TrimSpace(parts[0])), strings.Trim(strings.TrimSpace(parts[1]), "'"), true
+	return strings.ToLower(strings.TrimSpace(parts[0])), unquoteLiteral(parts[1]), true
 }
 
 // fastTerm is a pre-resolved bare `column = value` predicate: the column
@@ -346,9 +349,9 @@ func simpleFastTerm(expression string, t *Table) (fastTerm, bool) {
 		return fastTerm{}, false
 	}
 	colType := t.Columns[index].Type
-	raw := strings.Trim(strings.TrimSpace(parts[1]), "'")
+	raw := unquoteLiteral(parts[1])
 	expected := any(raw)
-	if value, err := parseVal(parts[1], colType); err == nil {
+	if value, err := parseVal(raw, colType); err == nil {
 		expected = value
 	}
 	term := fastTerm{index: index, expected: expected}
@@ -393,10 +396,33 @@ func matchFastTerm(values []any, term fastTerm) bool {
 	}
 }
 
+// indexOrderBy locates an "ORDER BY" clause outside quoted text, tolerating
+// any whitespace between the keywords, and returns the clause start (the
+// ORDER keyword) plus the offset just past BY. It reports -1 when absent;
+// a bare ORDER (e.g. a column literally named "order") is not a clause.
+func indexOrderBy(s string) (clauseStart, afterBy int) {
+	start := 0
+	for {
+		i := indexKeyword(s[start:], "ORDER")
+		if i < 0 {
+			return -1, -1
+		}
+		i += start
+		j := i + len("ORDER")
+		for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
+			j++
+		}
+		if foldEqualAt(s[j:], "BY") && (j+2 == len(s) || !identifierByte(s[j+2])) {
+			return i, j + 2
+		}
+		start = i + len("ORDER")
+	}
+}
+
 func parseSelectTail(rest string) (where, orderColumn string, descending bool, limit int, err error) {
 	limit = -1
 	whereStart := indexKeyword(rest, "WHERE")
-	orderStart := indexKeyword(rest, "ORDER BY")
+	orderStart, orderFields := indexOrderBy(rest)
 	limitStart := indexKeyword(rest, "LIMIT")
 	if whereStart >= 0 && (orderStart >= 0 && orderStart < whereStart || limitStart >= 0 && limitStart < whereStart) ||
 		orderStart >= 0 && limitStart >= 0 && limitStart < orderStart {
@@ -420,7 +446,7 @@ func parseSelectTail(rest string) (where, orderColumn string, descending bool, l
 		if limitStart > orderStart {
 			orderEnd = limitStart
 		}
-		order := strings.Fields(strings.TrimSpace(rest[orderStart+8 : orderEnd]))
+		order := strings.Fields(strings.TrimSpace(rest[orderFields:orderEnd]))
 		if len(order) == 0 {
 			return "", "", false, -1, errors.New("ORDER BY requires a column")
 		}
@@ -463,6 +489,11 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 	}
 	column := strings.ToLower(strings.TrimSpace(expression[open+1 : close]))
 	isCountStar := hasPrefixFold(trimmed, "COUNT(") && column == "*"
+	// Column validation is unconditional so aggregates on a missing column
+	// error identically on small tables and the fast path.
+	if column != "*" && !hasColumn(t.Columns, column) {
+		return Result{}, fmt.Errorf("column not found: %s", column)
+	}
 	compiled, validCondition := compileCondition(where, t.Columns)
 	if !validCondition {
 		return Result{}, errors.New("invalid WHERE expression")

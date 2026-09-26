@@ -35,20 +35,42 @@ func (d *Database) insert(ctx context.Context, s string) (Result, error) {
 		if err := tick.tick(ctx); err != nil {
 			return Result{}, err
 		}
-		if _, ok := t.Rows[item.key]; ok {
-			return Result{}, errors.New("duplicate primary key")
+		if item.key != "" {
+			if _, ok := t.Rows[item.key]; ok {
+				return Result{}, errors.New("duplicate primary key")
+			}
 		}
 	}
-	for _, item := range rows {
-		if err := tick.tick(ctx); err != nil {
-			return Result{}, err
+	if t.dead > 0 {
+		// Reclaim tombstones before appending so a reused primary key appears
+		// only once in Order. Do this once per INSERT, not once per row.
+		live := t.Order[:0]
+		for _, key := range t.Order {
+			if _, exists := t.Rows[key]; exists {
+				live = append(live, key)
+			}
 		}
-		t.Rows[item.key] = item.row
-		t.Order = append(t.Order, item.key)
+		for i := len(live); i < len(t.Order); i++ {
+			t.Order[i] = ""
+		}
+		t.Order = live
+		t.dead = 0
+		if len(t.fast) > 0 {
+			t.rebuildFastPathLocked()
+		}
+	}
+	for i := range rows {
+		if rows[i].key == "" {
+			// Tables without a primary key use synthetic row keys; "#" can
+			// never collide with a typed key produced by valueKey.
+			rows[i].key = t.nextSyntheticKeyLocked()
+		}
+		t.Rows[rows[i].key] = rows[i].row
+		t.Order = append(t.Order, rows[i].key)
 		for column := range t.Indexes {
-			t.addIndexValue(column, valueKey(item.row[column]), item.key)
+			t.addIndexValue(column, valueKey(rows[i].row[column]), rows[i].key)
 		}
-		t.appendFastRowLocked(item.key, item.row)
+		t.appendFastRowLocked(rows[i].key, rows[i].row)
 	}
 	return Result{Affected: len(rows)}, nil
 }
@@ -65,6 +87,7 @@ func parseInsertRows(raw string, columns []Column) ([]insertRow, error) {
 	}
 	rows := make([]insertRow, 0, len(groups))
 	seen := make(map[string]struct{}, len(groups))
+	hasPrimary := hasPrimaryColumn(columns)
 	for _, group := range groups {
 		vals := splitVals(group)
 		if len(vals) != len(columns) {
@@ -82,13 +105,15 @@ func parseInsertRows(raw string, columns []Column) ([]insertRow, error) {
 				key = valueKey(v)
 			}
 		}
-		if key == "" {
+		if key == "" && hasPrimary {
 			return nil, errors.New("primary key required")
 		}
-		if _, dup := seen[key]; dup {
-			return nil, errors.New("duplicate primary key")
+		if key != "" {
+			if _, dup := seen[key]; dup {
+				return nil, errors.New("duplicate primary key")
+			}
+			seen[key] = struct{}{}
 		}
-		seen[key] = struct{}{}
 		rows = append(rows, insertRow{key: key, row: row})
 	}
 	return rows, nil
@@ -98,8 +123,13 @@ func splitRows(s string) []string {
 	var out []string
 	start, depth := -1, 0
 	quote := false
-	for i, r := range s {
+	for i := 0; i < len(s); i++ {
+		r := s[i]
 		if r == '\'' {
+			if ni, skip := skipQuoted(s, i, quote); skip {
+				i = ni
+				continue
+			}
 			quote = !quote
 			continue
 		}

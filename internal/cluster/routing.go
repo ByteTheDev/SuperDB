@@ -59,12 +59,37 @@ func (r *Router) routeToRange(rng Range) Route {
 	return Route{Range: rng, Addr: addr, Local: target == r.self || (target == "" && rng.HasReplica(r.self)), Leader: target}
 }
 
+// indexFoldASCII is strings.Index(strings.ToUpper(s), sub) for ASCII
+// needles without allocating; offsets stay valid on the original string
+// even when it contains runes whose uppercase form differs in length.
+func indexFoldASCII(s, sub string) int {
+	if len(sub) > len(s) {
+		return -1
+	}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		ok := true
+		for j := 0; j < len(sub); j++ {
+			c := s[i+j]
+			if 'a' <= c && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+			if c != sub[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return i
+		}
+	}
+	return -1
+}
+
 // ExtractTableheuristically pulls a table name from SQL for routing.
 // DDL and unknown shapes route by the default range.
 func ExtractTable(sql string) string {
-	upper := strings.ToUpper(sql)
 	for _, kw := range []string{"INTO ", "FROM ", "TABLE ", "UPDATE "} {
-		if i := strings.Index(upper, kw); i >= 0 {
+		if i := indexFoldASCII(sql, kw); i >= 0 {
 			rest := sql[i+len(kw):]
 			fields := strings.FieldsFunc(rest, func(c rune) bool {
 				return c == ' ' || c == '\t' || c == '\n' || c == '(' || c == ';' || c == ','

@@ -117,7 +117,7 @@ func executeRequest(q request, s *session, mode, data string) any {
 			return map[string]string{"error": fmt.Sprintf("batch exceeds maximum of %d statements", lim)}
 		}
 		if q.Atomic && s.cluster != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), clusterTimeout(s.limits))
+			ctx, cancel := queryContext(s.limits)
 			defer cancel()
 			results, err := s.cluster.ExecAtomic(ctx, q.SQLs)
 			if err != nil {
@@ -128,6 +128,9 @@ func executeRequest(q request, s *session, mode, data string) any {
 				out = append(out, capResultRows(r, s.limits))
 			}
 			return out
+		}
+		if q.Atomic {
+			return executeAtomicBatch(q.SQLs, s, mode, data)
 		}
 		s.batch = true
 		s.pendingPersist = nil
@@ -145,13 +148,39 @@ func executeRequest(q request, s *session, mode, data string) any {
 	return executeSQL(q.SQL, s, mode, data)
 }
 
-// clusterTimeout returns the Raft round-trip budget: the configured
-// per-statement timeout when set, else the historical 30s default.
-func clusterTimeout(l Limits) time.Duration {
-	if l.QueryTimeout > 0 {
-		return l.QueryTimeout
+// executeAtomicBatch runs a local "sqls"+"atomic" request with real
+// atomicity: statements execute against a private clone, and the image is
+// published via CommitFrom only when every statement succeeds and no other
+// writer committed in between. On failure nothing is applied — the same
+// all-or-nothing semantics the cluster path gets from Raft.
+func executeAtomicBatch(sqls []string, s *session, mode, data string) any {
+	if s.tx != nil {
+		return map[string]string{"error": "atomic batch not allowed inside a transaction"}
 	}
-	return 30 * time.Second
+	clone, err := s.db.Clone()
+	if err != nil {
+		return map[string]string{"error": "batch: " + err.Error()}
+	}
+	out := make([]any, 0, len(sqls))
+	var writes []string
+	for i, sql := range sqls {
+		ctx, cancel := queryContext(s.limits)
+		res, err := clone.ExecWithOptions(ctx, sql, engine.ExecOptions{MaxRows: s.limits.MaxResultRows})
+		cancel()
+		if err != nil {
+			return map[string]string{"error": fmt.Sprintf("statement %d: %s", i+1, execErrorMessage(err))}
+		}
+		if isWriteSQL(sql) {
+			writes = append(writes, sql)
+		}
+		out = append(out, res)
+	}
+	if err := s.db.CommitFrom(clone, func(img *engine.Database) error {
+		return persistStatements(mode, data, writes, img, s.walWriter)
+	}); err != nil {
+		return map[string]string{"error": "batch commit: " + err.Error()}
+	}
+	return out
 }
 
 // queryContext applies the per-statement timeout. Zero leaves execution
@@ -171,7 +200,7 @@ func executeSQL(raw string, s *session, mode, data string) any {
 		if equalFold(trimmed, "BEGIN") || equalFold(trimmed, "COMMIT") || equalFold(trimmed, "ROLLBACK") {
 			return map[string]string{"error": "session transactions are not supported in cluster mode; send atomic batches instead"}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), clusterTimeout(s.limits))
+		ctx, cancel := queryContext(s.limits)
 		defer cancel()
 		res, err := s.cluster.Exec(ctx, raw)
 		if err != nil {

@@ -160,12 +160,26 @@ See [docs/cluster.md](docs/cluster.md) for the honest implemented-vs-planned spl
 
 The v1 query engine intentionally focuses on primary-key equality and simple literal filters.
 
+WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, and `>=` across SELECT,
+UPDATE, DELETE, and aggregate queries, combined with `AND`/`OR`. Ordered
+comparisons use each column's declared type (INT/FLOAT numerically, TEXT
+lexically). Predicates on unknown columns, unknown `ORDER BY` columns, and
+aggregates over unknown columns return errors instead of silently matching
+nothing. Single quotes inside text literals escape as `''`. Tables may omit
+`PRIMARY KEY`; such tables insert rows under synthetic keys and preserve
+insertion order.
+
 SELECT clauses follow `WHERE`, `ORDER BY`, then `LIMIT`; empty predicates and
 misordered clauses return errors. Clause keywords inside text literals or longer
 identifiers are not treated as SQL syntax. Numeric `MIN`/`MAX` and integer sorting
 use numeric order without losing integer precision. `COUNT(column)` excludes
 NULL values, while `COUNT(*)` includes every matching row. Ordered filters work
 with both small tables and the large-table fast path.
+
+Batch requests (`{"sqls": [...]}`) run each statement in order. Adding
+`"atomic": true` makes the batch all-or-nothing in both local and cluster
+modes: statements run against a private snapshot and publish only if every
+one succeeds and no other writer committed meanwhile.
 
 On cluster leader startup, SuperDB waits for committed log replay before
 returning, including entries written after the restored snapshot. Follower local

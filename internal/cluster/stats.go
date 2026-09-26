@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -33,8 +32,7 @@ func (s *Stats) Observe(sql string, d time.Duration, forwarded bool, failed bool
 	if failed {
 		s.errors.Add(1)
 	}
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	if strings.HasPrefix(upper, "SELECT") {
+	if sqlKeywordIs(sql, "SELECT") {
 		s.reads.Add(1)
 	} else {
 		s.writes.Add(1)

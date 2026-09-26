@@ -9,14 +9,16 @@ import (
 )
 
 func (d *Database) createIndex(ctx context.Context, s string) (Result, error) {
-	upper := strings.ToUpper(s)
-	on := strings.Index(upper, " ON ")
+	// Locate the ON keyword on the original string: indexing an uppercased
+	// copy is unsound because ToUpper can change byte length for some
+	// runes (e.g. 'ſ'), corrupting the substrings.
+	on := indexKeyword(s, "ON")
 	open, close := strings.Index(s, "("), strings.LastIndex(s, ")")
 	if on < 0 || open < 0 || close <= open {
 		return Result{}, errors.New("invalid CREATE INDEX")
 	}
 	indexName := strings.TrimSpace(s[len("CREATE INDEX"):on])
-	tableName := strings.TrimSpace(s[on+4 : open])
+	tableName := strings.TrimSpace(s[on+2 : open])
 	column := strings.ToLower(strings.TrimSpace(s[open+1 : close]))
 	if indexName == "" || tableName == "" || column == "" || strings.Contains(column, ",") {
 		return Result{}, errors.New("invalid CREATE INDEX")
@@ -103,6 +105,15 @@ func (d *Database) alterTable(ctx context.Context, s string) (Result, error) {
 		t.rebuildFastPathLocked()
 	}
 	return Result{Message: "column added"}, nil
+}
+
+func hasPrimaryColumn(columns []Column) bool {
+	for _, column := range columns {
+		if column.Primary {
+			return true
+		}
+	}
+	return false
 }
 
 func hasColumn(columns []Column, name string) bool {

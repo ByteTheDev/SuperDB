@@ -236,6 +236,12 @@ func NewAuthenticator(username, password string) Authenticator {
 	if username == "" && password == "" {
 		return Authenticator{}
 	}
+	if username == "" {
+		// The connection handler defaults an absent client username to the
+		// configured username and then "admin", so a password-only config
+		// must hash "admin" here or it can never authenticate.
+		username = "admin"
+	}
 	return Authenticator{
 		usernameHash: sha256.Sum256([]byte(username)),
 		passwordHash: sha256.Sum256([]byte(password)),

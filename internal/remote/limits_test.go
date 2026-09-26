@@ -6,6 +6,7 @@ import (
 	"time"
 
 	superdb "superdb"
+	"superdb/internal/engine"
 	"superdb/internal/server"
 )
 
@@ -136,5 +137,29 @@ func TestLoadConfigLimitEnv(t *testing.T) {
 	cfg = LoadConfig(Config{Limits: server.Limits{MaxResultRows: 5}})
 	if cfg.Limits.MaxResultRows != 5 || cfg.Limits.MaxInflightQueries != 8 {
 		t.Fatalf("explicit limit must override env: %+v", cfg.Limits)
+	}
+}
+
+type contextCheckingCluster struct {
+	deadline bool
+}
+
+func (c *contextCheckingCluster) Exec(ctx context.Context, _ string) (engine.Result, error) {
+	_, c.deadline = ctx.Deadline()
+	return engine.Result{}, nil
+}
+
+func (*contextCheckingCluster) ExecAtomic(context.Context, []string) ([]engine.Result, error) {
+	return nil, nil
+}
+
+func TestClusterQueryTimeoutDisabledByDefault(t *testing.T) {
+	cluster := &contextCheckingCluster{}
+	s := &session{cluster: cluster}
+	if _, _, err := s.execOne(context.Background(), "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+	if cluster.deadline {
+		t.Fatal("cluster query got an implicit timeout while QueryTimeout is disabled")
 	}
 }

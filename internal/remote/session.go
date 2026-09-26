@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"superdb/internal/cluster"
 	"superdb/internal/engine"
@@ -65,13 +64,12 @@ func (s *session) execOne(ctx context.Context, raw string) (engine.Result, strin
 		if isTxKeyword(trimmed) {
 			return engine.Result{}, "", &execError{Code: "UNSUPPORTED", Msg: "session transactions are not supported in cluster mode; send atomic batches instead"}
 		}
-		timeout := s.limits.QueryTimeout
-		if timeout <= 0 {
-			timeout = 30 * time.Second
+		if timeout := s.limits.QueryTimeout; timeout > 0 {
+			qctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			ctx = qctx
 		}
-		qctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		res, err := s.cluster.Exec(qctx, raw)
+		res, err := s.cluster.Exec(ctx, raw)
 		if err != nil {
 			return engine.Result{}, "", mapClusterError(err)
 		}

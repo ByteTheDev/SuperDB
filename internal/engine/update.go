@@ -41,19 +41,24 @@ func (d *Database) update(ctx context.Context, s string) (Result, error) {
 		return Result{}, e
 	}
 	wc, wv := "", ""
+	wop := opEq
 	hasWhere := wi >= 0
 	if hasWhere {
 		var err error
-		wc, wv, _, err = parseMutationWhere(s)
+		wc, wv, wop, _, err = parseMutationWhere(s)
 		if err != nil {
 			return Result{}, err
 		}
+	}
+	expected, err := mutationExpected(t, wc, wv, wop)
+	if err != nil {
+		return Result{}, err
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	pk := t.primaryColumn()
 	isPKUpdate := col == pk && pk != ""
-	if wc != "" && wc == pk {
+	if wc != "" && wc == pk && wop == opEq {
 		if row, ok := t.Rows[wv]; ok {
 			if !isPKUpdate {
 				old := valueKey(row[col])
@@ -68,7 +73,7 @@ func (d *Database) update(ctx context.Context, s string) (Result, error) {
 		return Result{}, nil
 	}
 	if isPKUpdate {
-		return t.updatePrimaryMultiLocked(wc, wv, v)
+		return t.updatePrimaryMultiLocked(wc, wv, wop, expected, v)
 	}
 	n := 0
 	tick := &rowTicker{}
@@ -76,7 +81,7 @@ func (d *Database) update(ctx context.Context, s string) (Result, error) {
 		if err := tick.tick(ctx); err != nil {
 			return Result{}, err
 		}
-		if wc != "" && !matchWhereValue(row[wc], wv) {
+		if wc != "" && !matchWhereOp(row[wc], wv, expected, wop) {
 			continue
 		}
 		t.removeIndexValue(col, valueKey(row[col]), key)
@@ -124,15 +129,38 @@ func (t *Table) rekeyPrimaryLocked(oldKey string, newVal any) (Result, error) {
 	return Result{Affected: 1}, nil
 }
 
+// mutationExpected resolves the raw WHERE value to the column's type for
+// ordered comparisons (equality paths keep their raw-string semantics).
+// A missing column is rejected for every operator: equality would silently
+// match nothing, != would silently match everything, and ordered
+// comparisons would be unpredictable.
+func mutationExpected(t *Table, column, value string, op uint8) (any, error) {
+	if column == "" {
+		return value, nil
+	}
+	for _, col := range t.Columns {
+		if col.Name == column {
+			if op == opEq || op == opNe {
+				return value, nil
+			}
+			if pv, err := parseVal(value, col.Type); err == nil {
+				return pv, nil
+			}
+			return value, nil
+		}
+	}
+	return nil, errors.New("invalid WHERE expression")
+}
+
 // updatePrimaryMultiLocked handles SET on the primary column for predicates
 // that are not a single primary-key equality (full-table or secondary
 // scans). It collects matches first so map mutation is safe, rejects
 // duplicates (against untouched rows and within the matched set), then
 // rekeys each row through rekeyPrimaryLocked.
-func (t *Table) updatePrimaryMultiLocked(wc, wv string, v any) (Result, error) {
+func (t *Table) updatePrimaryMultiLocked(wc, wv string, wop uint8, expected, v any) (Result, error) {
 	keys := make([]string, 0, 1)
 	for key, row := range t.Rows {
-		if wc != "" && !matchWhereValue(row[wc], wv) {
+		if wc != "" && !matchWhereOp(row[wc], wv, expected, wop) {
 			continue
 		}
 		keys = append(keys, key)

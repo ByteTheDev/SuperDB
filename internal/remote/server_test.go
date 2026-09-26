@@ -22,6 +22,7 @@ import (
 	superdb "superdb"
 	"superdb/internal/cluster"
 	"superdb/internal/engine"
+	"superdb/internal/server"
 	"superdb/internal/wire"
 )
 
@@ -225,6 +226,57 @@ func TestTransactions(t *testing.T) {
 	}
 	if len(rows.Data) != 1 {
 		t.Fatalf("commit failed: %+v", rows.Data)
+	}
+}
+
+func TestPasswordOnlyAuth(t *testing.T) {
+	// A config with only a password must still authenticate: the handler
+	// defaults an absent client username to "admin".
+	_, addr := testServer(t, Config{Password: "s3cret"})
+	host, port, _ := net.SplitHostPort(addr)
+	c, err := superdb.Connect("superdb://admin:s3cret@" + host + ":" + port + "/main")
+	if err != nil {
+		t.Fatalf("password-only auth rejected: %v", err)
+	}
+	defer c.Close()
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLimitsMaxConnections(t *testing.T) {
+	// Limits.MaxConnections is a second, finer-grained cap alongside
+	// Config.MaxConnections; it must actually refuse extra conns.
+	_, addr := testServer(t, Config{Limits: server.Limits{MaxConnections: 1}})
+	c := dialURL(t, addr, "", "")
+	defer c.Close()
+	if _, err := superdb.Connect("superdb://" + addr + "/main"); err == nil {
+		t.Fatal("second connection admitted past Limits.MaxConnections")
+	}
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("first connection disrupted: %v", err)
+	}
+}
+
+func TestClientCloseThenQueryFailsFast(t *testing.T) {
+	_, addr := testServer(t, Config{})
+	host, port, _ := net.SplitHostPort(addr)
+	c, err := superdb.Connect("superdb://" + host + ":" + port + "/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// After Close a new call must fail immediately, not hang waiting on a
+	// dead connection.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := c.Query(ctx, "SELECT 1"); err == nil {
+		t.Fatal("query after Close succeeded")
 	}
 }
 

@@ -173,14 +173,15 @@ Types are `INT`, `FLOAT`, `TEXT`, and `BOOL`. JSON decoding can turn numbers int
 
 Important behavior:
 
-- Primary keys use direct lookup fast paths.
+- Primary keys use direct lookup fast paths. Tables without a PRIMARY KEY insert rows under synthetic `#N` keys (in-memory counter; restored tables skip collisions) and keep insertion order.
 - Secondary indexes must stay correct after insert, update, delete, clone, and replace.
-- WHERE, ordering, limits, aggregates, and logical predicates are only the implemented subset of SQL.
+- WHERE, ordering, limits, aggregates, and logical predicates are only the implemented subset of SQL. WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=` combined with AND/OR; ordered comparisons use the column's declared type. Single quotes inside literals escape as `''` and are decoded on parse (BindParams round-trips them).
+- Predicates, ORDER BY columns, and aggregate arguments must reference real columns; unknown columns are errors on every path (SELECT, UPDATE, DELETE, aggregates).
 - SELECT clause order is WHERE, ORDER BY, LIMIT; reject empty WHERE clauses and misordered clauses without panicking. Keyword searches must skip quoted literals and identifier substrings.
 - Ordered predicates must agree across small-table, large-table, and indexed paths. MIN/MAX compare numeric values numerically; integer sorting preserves int64 precision. COUNT(column) excludes NULL; COUNT(*) counts all matching rows.
 - Transactions are session-local clones until COMMIT.
 - WAL records mutating SQL, not reads.
-- Batches execute and return results in order.
+- Batches execute and return results in order. `{"sqls":[...],"atomic":true}` is all-or-nothing locally too (clone + CommitFrom, persist-before-publish); it is rejected inside an open session transaction.
 
 Before adding SQL, inspect existing parser helpers and add tests for valid syntax, invalid syntax, type conversion, indexes, and persistence/replay.
 

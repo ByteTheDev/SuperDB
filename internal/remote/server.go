@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"superdb/internal/engine"
@@ -39,20 +40,11 @@ type Server struct {
 	conns    map[net.Conn]struct{}
 	wg       sync.WaitGroup
 	closed   chan struct{}
-	ready    atomicBool
+	ready    atomic.Bool
 
 	walWriter *storage.WALWriter
 	health    *healthServer
 }
-
-type atomicBool struct {
-	v  int32
-	mu sync.RWMutex
-	b  bool
-}
-
-func (a *atomicBool) Store(v bool) { a.mu.Lock(); a.b = v; a.mu.Unlock() }
-func (a *atomicBool) Load() bool   { a.mu.RLock(); defer a.mu.RUnlock(); return a.b }
 
 // New creates a server around an existing database handle.
 func New(db *engine.Database, cfg Config, cluster ClusterExec) *Server {
@@ -258,6 +250,12 @@ func (s *Server) Ready() bool { return s.ready.Load() }
 // a malformed frame from this client can never affect another connection.
 func (s *Server) handleConn(c net.Conn) {
 	defer c.Close()
+	// Limits.MaxConnections admission control: the sem above enforces
+	// cfg.MaxConnections; this enforces the finer-grained Limits cap.
+	if !s.limiter.AcquireConn() {
+		return
+	}
+	defer s.limiter.ReleaseConn()
 	if tcp, ok := c.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
 	}
