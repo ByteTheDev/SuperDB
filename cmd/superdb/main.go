@@ -71,6 +71,10 @@ func main() {
 		runRecover(args)
 		return
 	}
+	if command == "verify-backup" {
+		runVerifyBackup(args)
+		return
+	}
 	if command == "compact" {
 		runCompact(args)
 		return
@@ -84,7 +88,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println("usage: superdb [server|serve|status|backup|restore|recover|compact|update] [common flags]")
+	fmt.Println("usage: superdb [server|serve|status|backup|restore|recover|verify-backup|compact|update] [common flags]")
 	fmt.Println("       superdb --production [server flags]")
 	fmt.Println("       superdb serve --host 0.0.0.0 --port 7432 --data ./data")
 }
@@ -405,6 +409,37 @@ func runRecover(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Recovered %s into %s\n", path, *data)
+}
+
+func runVerifyBackup(args []string) {
+	fs := flag.NewFlagSet("verify-backup", flag.ExitOnError)
+	fs.Usage = func() { fmt.Println("usage: superdb verify-backup <backup-file-or-dir>") }
+	_ = fs.Parse(args)
+	if fs.NArg() != 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
+	path := fs.Arg(0)
+	info, err := os.Stat(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if info.IsDir() {
+		path, err = server.LatestBackup(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	result, err := server.VerifyBackup(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	checksumStatus := "not present (legacy backup; snapshot decoded successfully)"
+	if result.ChecksumVerified {
+		checksumStatus = "verified"
+	}
+	fmt.Printf("Backup valid: %s\nSize: %d bytes\nSHA-256: %s\nChecksum manifest: %s\n",
+		result.Path, result.SizeBytes, result.SHA256, checksumStatus)
 }
 
 func runCompact(args []string) {

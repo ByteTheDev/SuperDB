@@ -170,9 +170,13 @@ superdb serve --health-addr :8080 ...
 ```
 
 - `GET /health` → process alive (`{"status":"ok"}`)
-- `GET /ready` → ready for DB traffic (`{"status":"ready"}`)
+- `GET /ready` → readiness after storage load and listener startup, with
+  `checks.storage` and `checks.listener`; returns HTTP 503 until both are ready.
+- `GET /metrics` → Prometheus text exposition for connections, requests,
+  admission rejections, bytes, average request latency, and process uptime.
 
-These never expose secrets or data.
+These endpoints never expose secrets or database contents. Keep the health
+listener on a trusted network because metrics can reveal traffic levels.
 
 ## Protocol (SDB1)
 

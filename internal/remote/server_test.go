@@ -10,11 +10,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -642,6 +644,21 @@ func TestHealthEndpoints(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	if body["status"] != "ready" {
 		t.Fatalf("%v", body)
+	}
+	if checks, ok := body["checks"].(map[string]any); !ok || checks["storage"] != "ready" || checks["listener"] != "ready" {
+		t.Fatalf("readiness checks missing: %v", body)
+	}
+	resp, err = http.Get("http://" + healthAddr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(metrics), "superdb_active_connections") || !strings.Contains(string(metrics), "superdb_queries_total") {
+		t.Fatalf("unexpected metrics response status=%d body=%s", resp.StatusCode, metrics)
 	}
 }
 

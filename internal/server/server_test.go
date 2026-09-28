@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -279,5 +280,42 @@ func TestRecoverLatestRestoresNewestBackup(t *testing.T) {
 	result, err := restored.Exec("SELECT * FROM users WHERE id = 1")
 	if err != nil || len(result.Rows) != 1 || result.Rows[0][1] != "Ada" {
 		t.Fatalf("recovered database mismatch: result=%+v err=%v", result, err)
+	}
+}
+
+func TestBackupChecksumVerificationAndLegacyBackup(t *testing.T) {
+	dir := t.TempDir()
+	db := engine.New()
+	if _, err := db.Exec("CREATE TABLE checks (id INT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	path, err := CreateBackup(dir, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyBackup(path)
+	if err != nil || !verified.ChecksumVerified || verified.SizeBytes == 0 || verified.SHA256 == "" {
+		t.Fatalf("verify new backup: result=%+v err=%v", verified, err)
+	}
+
+	corrupt, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt[len(corrupt)-1] ^= 0xff
+	if err := os.WriteFile(path, corrupt, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBackup(path); err == nil {
+		t.Fatal("expected modified backup to fail verification")
+	}
+
+	legacyPath := filepath.Join(dir, "snapshot-20000101-000000.000000000.spdb")
+	if err := storage.WriteSnapshot(legacyPath, db); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := VerifyBackup(legacyPath)
+	if err != nil || legacy.ChecksumVerified {
+		t.Fatalf("legacy backup should decode without manifest: result=%+v err=%v", legacy, err)
 	}
 }

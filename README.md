@@ -76,8 +76,17 @@ go run ./cmd/superdb server --mode wal --data ./SUPERDB --backup-dir ./BACKUPS -
 go run ./cmd/superdb recover --backup-dir ./BACKUPS --data-dir ./SUPERDB
 ```
 
-The server writes timestamped snapshots to the backup directory. `recover` validates
-the newest snapshot before replacing the active snapshot.
+The server writes timestamped snapshots and SHA-256 manifests to the backup
+directory. Verify a backup file or the newest backup in a directory before
+recovery:
+
+```bash
+go run ./cmd/superdb verify-backup ./BACKUPS
+```
+
+`recover` validates the newest snapshot and its checksum, when present, before
+replacing the active snapshot. Older backups without manifests remain readable
+and are checked by decoding the snapshot.
 
 ### Hosted mode (remote access)
 

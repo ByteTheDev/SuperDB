@@ -121,6 +121,7 @@ go run ./cmd/superdb status --data-dir ./SUPERDB
 go run ./cmd/superdb backup ./backups/today --data-dir ./SUPERDB
 go run ./cmd/superdb restore ./backups/today --data-dir ./SUPERDB
 go run ./cmd/superdb recover --backup-dir ./BACKUPS --data-dir ./SUPERDB
+go run ./cmd/superdb verify-backup ./BACKUPS
 go run ./cmd/superdb compact --data-dir ./SUPERDB
 go run ./cmd/superdb update --check
 ```
@@ -136,7 +137,7 @@ Server-only flags include `--profile standard|production`, `--production`, `--ba
 
 Safety-limit flags on `server` (all default to disabled): `--query-timeout`, `--max-result-rows`, `--max-result-bytes`, `--max-inflight-queries`, `--query-queue-timeout`, `--max-connections`, `--max-batch-statements`, `--max-tx-statements`, `--max-tx-database-rows`, `--max-request-bytes`. `serve` exposes the same set minus connection/batch/request caps (already covered by `MaxConnections` and frame size) plus `SUPERDB_*` env vars; see `docs/hosted.md`.
 
-`status` reports configured values and local snapshot/WAL file sizes. `backup` copies active `.spdb` files. `restore` copies them into the data directory. `recover` validates and restores the newest timestamped snapshot backup. `compact` rewrites a snapshot from the loaded snapshot state.
+`status` reports configured values and local snapshot/WAL file sizes. `backup` copies active `.spdb` files. `restore` copies them into the data directory. `recover` validates and restores the newest timestamped snapshot backup. `verify-backup` validates a named snapshot or the newest timestamped snapshot in a directory, including its SHA-256 manifest when present. Older backups without manifests remain supported after snapshot decoding. `compact` rewrites a snapshot from the loaded snapshot state.
 
 Client examples:
 
@@ -277,15 +278,15 @@ After editing, run formatting, tests, vet, build, race tests when relevant, benc
 
 ## Known limitations and roadmap
 
-Not yet implemented: authorization, sharded storage, auto-splitting, cross-shard transactions, Prometheus metrics, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Raft quorum writes/failover, range split/move/assign, atomic batches, and region placement exist (all voters hold all data); see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check. Access keys (local `--auth-key`), username/password auth and TLS (`serve`), and connection/query safety limits exist; see "Safety limits".
+Not yet implemented: per-user authorization, sharded storage, auto-splitting, cross-shard transactions, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Raft quorum writes/failover, range split/move/assign, atomic batches, and region placement exist (all voters hold all data); see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check. Access keys (local `--auth-key`), username/password auth and TLS (`serve`), and connection/query safety limits exist; see "Safety limits".
 
 Recommended priorities:
 
 1. Local-server TLS and stronger authorization.
-2. Checksums and stronger backup verification.
+2. Checksums for active snapshot/WAL frames beyond backup manifests.
 3. Prepared statements and streaming result sets.
 4. Proper interactive SQL shell.
-5. Metrics and health/readiness endpoints.
+5. Live cluster-aware readiness, metrics for engine/storage/Raft, and health endpoint binding controls.
 6. Reproducible SuperDB/SQLite/PostgreSQL/CockroachDB benchmark harness.
 
 ## Handoff format
