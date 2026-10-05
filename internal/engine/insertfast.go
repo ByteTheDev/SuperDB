@@ -20,6 +20,14 @@ type span struct {
 // mismatch" before any value parsing, missing keys report "primary key
 // required", and duplicates report "duplicate primary key" at the same row.
 func parseInsertRowsFast(raw string, columns []Column) ([]insertRow, error) {
+	return parseInsertRowsMode(raw, columns, false)
+}
+
+// parseInsertRowsMode is parseInsertRowsFast with a duplicate-key policy:
+// keepLast=false rejects within-batch duplicate keys (plain INSERT), while
+// keepLast=true lets later rows replace earlier ones (INSERT OR REPLACE,
+// where the shared apply loop upserts each row in order).
+func parseInsertRowsMode(raw string, columns []Column, keepLast bool) ([]insertRow, error) {
 	payload := strings.TrimSpace(raw)
 	rows := []insertRow(nil)
 	var seen map[string]struct{}
@@ -50,7 +58,7 @@ func parseInsertRowsFast(raw string, columns []Column) ([]insertRow, error) {
 		if key == "" && hasPrimary {
 			return errors.New("primary key required")
 		}
-		if key != "" && len(rows) >= 1 {
+		if key != "" && len(rows) >= 1 && !keepLast {
 			if seen == nil {
 				seen = make(map[string]struct{}, 4)
 				for _, previous := range rows {

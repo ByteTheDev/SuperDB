@@ -7,7 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 )
+
+// zlibPool recycles BestSpeed compressors: snapshot-heavy modes (snapshot
+// durability, backups, compact) otherwise pay a fresh compressor
+// allocation for every frame.
+var zlibPool = sync.Pool{New: func() any {
+	w, err := zlib.NewWriterLevel(io.Discard, zlib.BestSpeed)
+	if err != nil {
+		panic(err)
+	}
+	return w
+}}
 
 const (
 	magic          = "SUPERDB1"
@@ -34,16 +46,17 @@ func encodeFrame(kind, frameVersion byte, payload []byte, compress bool) ([]byte
 	encoded := payload
 	if compress {
 		var compressed bytes.Buffer
-		zw, err := zlib.NewWriterLevel(&compressed, zlib.BestSpeed)
-		if err != nil {
-			return nil, err
-		}
+		zw := zlibPool.Get().(*zlib.Writer)
+		zw.Reset(&compressed)
 		if _, err := zw.Write(payload); err != nil {
+			zlibPool.Put(zw)
 			return nil, err
 		}
 		if err := zw.Close(); err != nil {
+			zlibPool.Put(zw)
 			return nil, err
 		}
+		zlibPool.Put(zw)
 		encoded = compressed.Bytes()
 	}
 	if len(encoded) > maxPayloadSize {

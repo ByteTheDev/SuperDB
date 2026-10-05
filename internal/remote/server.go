@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -21,6 +22,15 @@ import (
 )
 
 const maxAuthFailures = 5
+
+// framePool recycles request payload buffers up to 64 KiB, the common
+// OLTP frame size, so the per-request read path allocates nothing.
+var framePool = sync.Pool{New: func() any { return make([]byte, 0, 64<<10) }}
+
+// errorResponse builds a JSON error payload through the fast encoder.
+func errorResponse(requestID uint64, code, msg string) []byte {
+	return mustResponseJSON(wire.Response{RequestID: requestID, Status: "error", ErrorCode: code, ErrorMessage: msg})
+}
 
 // Server is the hosted SuperDB TCP server speaking the SDB1 wire protocol.
 // It calls the existing engine (and optionally Raft via ClusterExec) — it
@@ -271,9 +281,28 @@ func (s *Server) handleConn(c net.Conn) {
 		} else if s.cfg.ReadTimeout > 0 {
 			_ = c.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
 		}
-		hdr, payload, err := wire.ReadFrame(r)
+		hdr, err := wire.ReadHeader(r)
 		if err != nil {
 			return // disconnect, timeout, or malformed header: drop only this conn
+		}
+		// Recycle request buffers up to 64 KiB; larger frames allocate
+		// ad hoc so a rare big request cannot pin pool memory.
+		var payload []byte
+		pooled := false
+		if hdr.Length <= 64<<10 {
+			if buf, ok := framePool.Get().([]byte); ok && cap(buf) >= int(hdr.Length) {
+				payload = buf[:hdr.Length]
+				pooled = true
+			}
+		}
+		if payload == nil {
+			payload = make([]byte, hdr.Length)
+		}
+		if _, err := io.ReadFull(r, payload); err != nil {
+			if pooled {
+				framePool.Put(payload[:0])
+			}
+			return
 		}
 		s.metrics.bytesRx.Add(uint64(wire.HeaderLen) + uint64(len(payload)))
 		start := time.Now()
@@ -287,13 +316,17 @@ func (s *Server) handleConn(c net.Conn) {
 			if err := s.limiter.AcquireQuery(context.Background()); err != nil {
 				s.metrics.rejectedQueries.Add(1)
 				respType, respID = wire.TypeResponse, hdr.RequestID
-				respPayload = wire.ErrorResponse(hdr.RequestID, wire.ErrBusy, "server overloaded; retry later")
+				respPayload = errorResponse(hdr.RequestID, wire.ErrBusy, "server overloaded; retry later")
 			} else {
 				respType, respID, respPayload = s.dispatch(sess, hdr, payload, c)
 				s.limiter.ReleaseQuery()
 			}
 		} else {
 			respType, respID, respPayload = s.dispatch(sess, hdr, payload, c)
+		}
+		// dispatch fully consumed the request payload — safe to recycle.
+		if pooled {
+			framePool.Put(payload[:0])
 		}
 		s.metrics.queries.Add(1)
 		s.metrics.latencyNanos.Add(uint64(time.Since(start).Nanoseconds()))
@@ -302,19 +335,18 @@ func (s *Server) handleConn(c net.Conn) {
 		}
 		if max := s.cfg.Limits.MaxResultBytes; max > 0 && len(respPayload) > max {
 			s.metrics.failedQueries.Add(1)
-			respPayload = wire.ErrorResponse(respID, wire.ErrResultTooLarge, "result exceeds maximum size")
+			respPayload = errorResponse(respID, wire.ErrResultTooLarge, "result exceeds maximum size")
 		}
 		if len(respPayload) > wire.MaxFrameSize {
-			respPayload = wire.ErrorResponse(respID, wire.ErrInternal, "response too large")
+			respPayload = errorResponse(respID, wire.ErrInternal, "response too large")
 		}
-		frame := wire.EncodeFrame(respType, respID, respPayload)
-		if _, err := w.Write(frame); err != nil {
+		if err := wire.WriteFrameRaw(w, respType, respID, respPayload); err != nil {
 			return
 		}
 		if err := w.Flush(); err != nil {
 			return
 		}
-		s.metrics.bytesTx.Add(uint64(len(frame)))
+		s.metrics.bytesTx.Add(uint64(wire.HeaderLen) + uint64(len(respPayload)))
 		if hdr.Type == wire.TypeClose {
 			return
 		}
@@ -331,7 +363,7 @@ func (s *Server) dispatch(sess *session, hdr wire.Header, payload []byte, c net.
 		defer func() {
 			if rec := recover(); rec != nil {
 				s.metrics.failedQueries.Add(1)
-				out = wire.ErrorResponse(hdr.RequestID, wire.ErrInternal, "internal error")
+				out = errorResponse(hdr.RequestID, wire.ErrInternal, "internal error")
 			}
 		}()
 		out = s.handle(sess, hdr, payload)
@@ -365,12 +397,12 @@ func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
 	case wire.TypeHello:
 		var p wire.HelloPayload
 		_ = json.Unmarshal(payload, &p)
-		return wire.MustJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "SDB1 v1"})
+		return mustResponseJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "SDB1 v1"})
 	case wire.TypeAuth:
 		var p wire.AuthPayload
 		if err := json.Unmarshal(payload, &p); err != nil {
 			s.metrics.failedQueries.Add(1)
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrInvalidRequest, "invalid auth payload")
+			return errorResponse(hdr.RequestID, wire.ErrInvalidRequest, "invalid auth payload")
 		}
 		if p.Database != "" {
 			sess.database = p.Database
@@ -391,39 +423,39 @@ func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
 		}
 		if s.auth.Verify(user, secret) {
 			sess.authed = true
-			return wire.MustJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "authenticated"})
+			return mustResponseJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "authenticated"})
 		}
 		sess.authFails++
 		s.metrics.authFailures.Add(1)
 		s.metrics.failedQueries.Add(1)
-		return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthFailed, "authentication failed")
+		return errorResponse(hdr.RequestID, wire.ErrAuthFailed, "authentication failed")
 	case wire.TypePing:
-		return wire.MustJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "pong"})
+		return mustResponseJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "pong"})
 	case wire.TypeQuery, wire.TypeExec:
 		if s.auth.Required() && !sess.authed {
 			s.metrics.failedQueries.Add(1)
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
+			return errorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
 		}
 		var p wire.QueryPayload
 		if err := json.Unmarshal(payload, &p); err != nil {
 			s.metrics.failedQueries.Add(1)
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrInvalidRequest, "invalid request payload")
+			return errorResponse(hdr.RequestID, wire.ErrInvalidRequest, "invalid request payload")
 		}
 		if len(p.SQL) == 0 {
 			s.metrics.failedQueries.Add(1)
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrInvalidRequest, "sql required")
+			return errorResponse(hdr.RequestID, wire.ErrInvalidRequest, "sql required")
 		}
 		if len(p.SQL) > wire.MaxQuerySize {
 			s.metrics.failedQueries.Add(1)
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrInvalidRequest, "query too large")
+			return errorResponse(hdr.RequestID, wire.ErrInvalidRequest, "query too large")
 		}
 		bound, err := bind(p.SQL, p.Params)
 		if err != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := err.(*execError); ok {
-				return wire.ErrorResponse(hdr.RequestID, ee.Code, ee.Msg)
+				return errorResponse(hdr.RequestID, ee.Code, ee.Msg)
 			}
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrInvalidRequest, err.Error())
+			return errorResponse(hdr.RequestID, wire.ErrInvalidRequest, err.Error())
 		}
 		ctx, cancel := s.queryContext()
 		defer cancel()
@@ -432,58 +464,58 @@ func (s *Server) handle(sess *session, hdr wire.Header, payload []byte) []byte {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := execErr.(*execError); ok {
 				r := wire.Response{RequestID: hdr.RequestID, Status: "error", ErrorCode: ee.Code, ErrorMessage: ee.Msg, Retryable: ee.Retryable, LeaderAddr: ee.LeaderAddr}
-				return wire.MustJSON(r)
+				return mustResponseJSON(r)
 			}
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrQueryError, execErr.Error())
+			return errorResponse(hdr.RequestID, wire.ErrQueryError, execErr.Error())
 		}
-		return wire.MustJSON(wire.Response{
+		return mustResponseJSON(wire.Response{
 			RequestID: hdr.RequestID, Status: "ok",
 			Columns: res.Columns, Rows: res.Rows,
 			AffectedRows: res.Affected, Message: res.Message,
 		})
 	case wire.TypeBegin:
 		if s.auth.Required() && !sess.authed {
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
+			return errorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
 		}
 		res, _, err := sess.execOne(context.Background(), "BEGIN")
 		if err != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := err.(*execError); ok {
-				return wire.ErrorResponse(hdr.RequestID, ee.Code, ee.Msg)
+				return errorResponse(hdr.RequestID, ee.Code, ee.Msg)
 			}
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrQueryError, err.Error())
+			return errorResponse(hdr.RequestID, wire.ErrQueryError, err.Error())
 		}
-		return wire.MustJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: res.Message})
+		return mustResponseJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: res.Message})
 	case wire.TypeCommit:
 		if s.auth.Required() && !sess.authed {
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
+			return errorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
 		}
 		res, _, err := sess.execOne(context.Background(), "COMMIT")
 		if err != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := err.(*execError); ok {
-				return wire.ErrorResponse(hdr.RequestID, ee.Code, ee.Msg)
+				return errorResponse(hdr.RequestID, ee.Code, ee.Msg)
 			}
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrQueryError, err.Error())
+			return errorResponse(hdr.RequestID, wire.ErrQueryError, err.Error())
 		}
-		return wire.MustJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: res.Message})
+		return mustResponseJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: res.Message})
 	case wire.TypeRollback:
 		if s.auth.Required() && !sess.authed {
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
+			return errorResponse(hdr.RequestID, wire.ErrAuthRequired, "authentication required")
 		}
 		res, _, err := sess.execOne(context.Background(), "ROLLBACK")
 		if err != nil {
 			s.metrics.failedQueries.Add(1)
 			if ee, ok := err.(*execError); ok {
-				return wire.ErrorResponse(hdr.RequestID, ee.Code, ee.Msg)
+				return errorResponse(hdr.RequestID, ee.Code, ee.Msg)
 			}
-			return wire.ErrorResponse(hdr.RequestID, wire.ErrQueryError, err.Error())
+			return errorResponse(hdr.RequestID, wire.ErrQueryError, err.Error())
 		}
-		return wire.MustJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: res.Message})
+		return mustResponseJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: res.Message})
 	case wire.TypeClose:
-		return wire.MustJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "bye"})
+		return mustResponseJSON(wire.Response{RequestID: hdr.RequestID, Status: "ok", Message: "bye"})
 	default:
 		s.metrics.failedQueries.Add(1)
-		return wire.ErrorResponse(hdr.RequestID, wire.ErrUnsupported, "unsupported operation")
+		return errorResponse(hdr.RequestID, wire.ErrUnsupported, "unsupported operation")
 	}
 }

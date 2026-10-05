@@ -156,6 +156,27 @@ func WriteFrame(w io.Writer, msgType uint8, requestID uint64, payload []byte) er
 	return err
 }
 
+// WriteFrameRaw writes one frame as two writes — header then payload —
+// avoiding the full-size concatenation copy EncodeFrame performs. Intended
+// for the server hot path writing into a buffered connection writer.
+func WriteFrameRaw(w io.Writer, msgType uint8, requestID uint64, payload []byte) error {
+	if len(payload) > MaxFrameSize {
+		return fmt.Errorf("payload too large: %d", len(payload))
+	}
+	var h [HeaderLen]byte
+	copy(h[0:4], Magic[:])
+	binary.BigEndian.PutUint16(h[4:6], Version)
+	h[6] = msgType
+	h[7] = 0
+	binary.BigEndian.PutUint64(h[8:16], requestID)
+	binary.BigEndian.PutUint32(h[16:20], uint32(len(payload)))
+	if _, err := w.Write(h[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(payload)
+	return err
+}
+
 // MustJSON marshals v to JSON.
 func MustJSON(v any) []byte {
 	b, err := json.Marshal(v)

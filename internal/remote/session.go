@@ -238,20 +238,7 @@ func equalFold(s, keyword string) bool {
 }
 
 func isWriteSQL(raw string) bool {
-	s := strings.TrimSpace(raw)
-	if len(s) < 6 {
-		return true
-	}
-	for i := 0; i < 6; i++ {
-		c := s[i]
-		if 'a' <= c && c <= 'z' {
-			c -= 'a' - 'A'
-		}
-		if c != "SELECT"[i] {
-			return true
-		}
-	}
-	return false
+	return !engine.IsReadOnly(raw)
 }
 
 func writeStatements(sqls []string) []string {

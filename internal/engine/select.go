@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -24,6 +24,14 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 		return Result{}, err
 	}
 	selectExpr := strings.TrimSpace(s[6:fi])
+	distinct := false
+	if hasPrefixFold(selectExpr, "DISTINCT") && (len(selectExpr) == len("DISTINCT") || isBlankByte(selectExpr[len("DISTINCT")])) {
+		distinct = true
+		selectExpr = strings.TrimSpace(selectExpr[len("DISTINCT"):])
+		if selectExpr == "" {
+			return Result{}, errors.New("SELECT DISTINCT requires columns")
+		}
+	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	names := []string{}
@@ -36,24 +44,83 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 			names = append(names, strings.ToLower(strings.TrimSpace(x)))
 		}
 	}
-	where, orderColumn, descending, limit, err := parseSelectTail(rest)
+	tail, err := parseSelectTail(rest)
 	if err != nil {
 		return Result{}, err
+	}
+	// Only the table name may precede the first clause: previously a
+	// trailing "JOIN ..." or alias was silently ignored while the single
+	// table was scanned. Reject it instead of misreading the query.
+	if fields := strings.Fields(rest[:tail.headEnd]); len(fields) != 1 {
+		return Result{}, errors.New("invalid FROM clause")
+	}
+	where, orderColumn, descending, limit, offset := tail.where, tail.orderColumn, tail.descending, tail.limit, tail.offset
+	if len(tail.groupBy) > 0 {
+		return groupedResult(ctx, t, selectExpr, tail, distinct, maxRows)
 	}
 	if orderColumn != "" && !hasColumn(t.Columns, orderColumn) {
 		return Result{}, fmt.Errorf("ORDER BY column not found: %s", orderColumn)
 	}
 	if isAggregate(selectExpr) {
-		return aggregateResult(ctx, t, selectExpr, where)
+		r, err := aggregateResult(ctx, t, selectExpr, where)
+		if err == nil && (limit == 0 || offset > 0) {
+			r.Rows = nil
+		}
+		return r, err
 	}
 	tick := &rowTicker{}
 	// rowCap bounds materialized rows: when a MaxRows policy applies, emit
 	// at most maxRows+1 so exceeding the cap is detected (and aborted)
 	// without buffering an unbounded result. The explicit LIMIT still
-	// wins when it is smaller.
-	rowCap := limit
-	if maxRows > 0 && (rowCap < 0 || rowCap > maxRows) {
-		rowCap = maxRows + 1
+	// wins when it is smaller. OFFSET widens both caps by the skipped
+	// count, since offset rows must be collected before they are dropped.
+	rowCap := -1
+	if limit >= 0 {
+		rowCap = satAdd(limit, offset)
+	}
+	if maxRows > 0 {
+		emitCap := satAdd(satAdd(maxRows, offset), 1)
+		if rowCap < 0 || rowCap > emitCap {
+			rowCap = emitCap
+		}
+	}
+	// applyOffset drops the OFFSET head of a collected result.
+	applyOffset := func(rows [][]any) [][]any {
+		if offset <= 0 {
+			return rows
+		}
+		if offset >= len(rows) {
+			return rows[:0]
+		}
+		return rows[offset:]
+	}
+	// addLine deduplicates projected rows for SELECT DISTINCT. Keys are a
+	// type-tagged, length-prefixed valueKey encoding, so ("a","b|c") can
+	// never collide with ("a|b","c") and NULL never collides with "NULL".
+	var seen map[string]struct{}
+	addLine := func(rows [][]any, line []any) [][]any {
+		if distinct {
+			k := rowProjectionKey(line)
+			if _, dup := seen[k]; dup {
+				return rows
+			}
+			if seen == nil {
+				seen = make(map[string]struct{})
+			}
+			seen[k] = struct{}{}
+		}
+		return append(rows, line)
+	}
+	// projectedKey resolves a stored row key to its DISTINCT dedup key,
+	// preferring the fast array and falling back to the row map.
+	projectedKey := func(key string) (string, bool) {
+		if fi, ok := t.fastPos[key]; ok && fi >= 0 && fi < len(t.fast) && t.fast[fi].key != "" {
+			return rowProjectionKey(selectedFastValues(t.fast[fi], names, t.columns)), true
+		}
+		if row, exists := t.Rows[key]; exists {
+			return rowProjectionKey(selectedValues(row, names)), true
+		}
+		return "", false
 	}
 	simpleColumn, simpleValue, simple := simpleEquality(where)
 	if simple && simpleColumn == t.primaryColumn() {
@@ -65,6 +132,7 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 			if limit == 0 {
 				r.Rows = nil
 			}
+			r.Rows = applyOffset(r.Rows)
 			return r, nil
 		}
 		if row, exists := t.Rows[simpleValue]; exists {
@@ -73,6 +141,7 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 		if limit == 0 {
 			r.Rows = nil
 		}
+		r.Rows = applyOffset(r.Rows)
 		return r, nil
 	}
 	var compiled compiledCondition
@@ -87,13 +156,23 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 			return Result{}, errors.New("invalid WHERE expression")
 		}
 	}
-	keys := make([]string, 0, len(t.Order))
+	// Preallocate by the cap when a LIMIT applies: LIMIT 10 over a
+	// million-row table should not reserve a million slots.
+	capHint := len(t.Order)
+	if rowCap >= 0 && rowCap < capHint {
+		capHint = rowCap
+	}
+	keys := make([]string, 0, capHint)
 	indexed := false
 	if simple && t.Indexes[simpleColumn] != nil {
 		indexed = true
 	}
 	if len(t.fast) > 0 && orderColumn == "" && !indexed {
-		r := Result{Columns: names, Rows: make([][]any, 0, len(t.fast))}
+		scanRows := len(t.fast)
+		if rowCap >= 0 && rowCap < scanRows {
+			scanRows = rowCap
+		}
+		r := Result{Columns: names, Rows: make([][]any, 0, scanRows)}
 		if limit == 0 {
 			return r, nil
 		}
@@ -102,7 +181,7 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 		// compared with no per-row map lookups.
 		if fastTermOK {
 			emit := func(row fastRow) {
-				r.Rows = append(r.Rows, selectedFastValues(row, names, t.columns))
+				r.Rows = addLine(r.Rows, selectedFastValues(row, names, t.columns))
 			}
 			switch term.kind {
 			case fastInt:
@@ -186,6 +265,7 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 					}
 				}
 			}
+			r.Rows = applyOffset(r.Rows)
 			return r, capResultRows(r, maxRows)
 		}
 		for _, row := range t.fast {
@@ -198,12 +278,34 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 			if where != "" && !compiled.matchesFast(row.values, t.columns) {
 				continue
 			}
-			r.Rows = append(r.Rows, selectedFastValues(row, names, t.columns))
+			r.Rows = addLine(r.Rows, selectedFastValues(row, names, t.columns))
 			if rowCap >= 0 && len(r.Rows) >= rowCap {
 				break
 			}
 		}
+		r.Rows = applyOffset(r.Rows)
 		return r, capResultRows(r, maxRows)
+	}
+	// dedupKey checks (and records) a candidate's projected row for SELECT
+	// DISTINCT. It reports whether the candidate is a duplicate and can be
+	// skipped during key collection, so early rowCap breaks still count
+	// unique rows rather than raw matches.
+	dedupKey := func(key string) bool {
+		if !distinct {
+			return false
+		}
+		pk, ok := projectedKey(key)
+		if !ok {
+			return false
+		}
+		if _, dup := seen[pk]; dup {
+			return true
+		}
+		if seen == nil {
+			seen = make(map[string]struct{})
+		}
+		seen[pk] = struct{}{}
+		return false
 	}
 	if simple && t.Indexes[simpleColumn] != nil {
 		// Verify candidates against the fast array when available: no
@@ -217,12 +319,12 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 					break
 				}
 				if fi, present := t.fastPos[key]; present && t.fast[fi].key != "" {
-					if matchFastTerm(t.fast[fi].values, term) {
+					if matchFastTerm(t.fast[fi].values, term) && !dedupKey(key) {
 						keys = append(keys, key)
 					}
 					continue
 				}
-				if row, exists := t.Rows[key]; exists && conditionValueEqual(row[simpleColumn], term.expected) {
+				if row, exists := t.Rows[key]; exists && conditionValueEqual(row[simpleColumn], term.expected) && !dedupKey(key) {
 					keys = append(keys, key)
 				}
 			}
@@ -234,7 +336,7 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 				if orderColumn == "" && rowCap >= 0 && len(keys) >= rowCap {
 					break
 				}
-				if row, exists := t.Rows[key]; exists && compiled.matchesMap(row) {
+				if row, exists := t.Rows[key]; exists && compiled.matchesMap(row) && !dedupKey(key) {
 					keys = append(keys, key)
 				}
 			}
@@ -251,6 +353,9 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 			if where != "" && !compiled.matchesMap(row) {
 				continue
 			}
+			if dedupKey(key) {
+				continue
+			}
 			keys = append(keys, key)
 			if orderColumn == "" && rowCap >= 0 && len(keys) >= rowCap {
 				break
@@ -261,31 +366,44 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		sort.SliceStable(keys, func(i, j int) bool {
-			leftValue, rightValue := t.Rows[keys[i]][orderColumn], t.Rows[keys[j]][orderColumn]
-			if descending {
-				return valueLess(rightValue, leftValue)
-			}
-			return valueLess(leftValue, rightValue)
-		})
+		// Order values are resolved once per row; when a LIMIT is smaller
+		// than the candidate set a bounded top-K heap avoids the full sort.
+		// DISTINCT sorts everything instead: truncating keys before dedup
+		// could drop unique rows that a top-K cut cannot anticipate.
+		orderCap := rowCap
+		if distinct {
+			orderCap = -1
+		}
+		keys = orderKeys(t, keys, orderColumn, descending, orderCap)
 	}
-	if rowCap >= 0 && len(keys) > rowCap {
+	if !distinct && rowCap >= 0 && len(keys) > rowCap {
 		keys = keys[:rowCap]
 	}
 	r := Result{Columns: names, Rows: make([][]any, 0, len(keys))}
+	// Surviving keys are already DISTINCT-unique (dedupKey filtered them
+	// during collection), so materialization appends directly.
 	if len(t.fast) > 0 {
 		for _, key := range keys {
+			var line []any
 			if fi, ok := t.fastPos[key]; ok && t.fast[fi].key != "" {
-				r.Rows = append(r.Rows, selectedFastValues(t.fast[fi], names, t.columns))
-				continue
+				line = selectedFastValues(t.fast[fi], names, t.columns)
+			} else {
+				line = selectedValues(t.Rows[key], names)
 			}
-			r.Rows = append(r.Rows, selectedValues(t.Rows[key], names))
+			r.Rows = append(r.Rows, line)
+			if rowCap >= 0 && len(r.Rows) >= rowCap {
+				break
+			}
 		}
 	} else {
 		for _, key := range keys {
 			r.Rows = append(r.Rows, selectedValues(t.Rows[key], names))
+			if rowCap >= 0 && len(r.Rows) >= rowCap {
+				break
+			}
 		}
 	}
+	r.Rows = applyOffset(r.Rows)
 	return r, capResultRows(r, maxRows)
 }
 
@@ -401,88 +519,169 @@ func matchFastTerm(values []any, term fastTerm) bool {
 // ORDER keyword) plus the offset just past BY. It reports -1 when absent;
 // a bare ORDER (e.g. a column literally named "order") is not a clause.
 func indexOrderBy(s string) (clauseStart, afterBy int) {
+	return indexPairKeyword(s, "ORDER", "BY")
+}
+
+// indexGroupBy locates a "GROUP BY" clause with the same rules as
+// indexOrderBy.
+func indexGroupBy(s string) (clauseStart, afterBy int) {
+	return indexPairKeyword(s, "GROUP", "BY")
+}
+
+// indexPairKeyword locates a two-word clause ("ORDER BY", "GROUP BY")
+// outside quoted text, tolerating any whitespace between the words. It
+// returns the clause start plus the offset just past the second word, or
+// -1 when absent; a bare first word (e.g. a column named "order") is not
+// a clause.
+func indexPairKeyword(s, first, second string) (clauseStart, afterBy int) {
 	start := 0
 	for {
-		i := indexKeyword(s[start:], "ORDER")
+		i := indexKeyword(s[start:], first)
 		if i < 0 {
 			return -1, -1
 		}
 		i += start
-		j := i + len("ORDER")
+		j := i + len(first)
 		for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
 			j++
 		}
-		if foldEqualAt(s[j:], "BY") && (j+2 == len(s) || !identifierByte(s[j+2])) {
-			return i, j + 2
+		if foldEqualAt(s[j:], second) && (j+len(second) == len(s) || !identifierByte(s[j+len(second)])) {
+			return i, j + len(second)
 		}
-		start = i + len("ORDER")
+		start = i + len(first)
 	}
 }
 
-func parseSelectTail(rest string) (where, orderColumn string, descending bool, limit int, err error) {
-	limit = -1
+// selectTail is the parsed tail of a SELECT after the table name. headEnd
+// marks where the table-name region ends (the first clause keyword, or the
+// end of the string), so callers can reject junk like a JOIN remainder
+// instead of silently reading only the first table.
+type selectTail struct {
+	where       string
+	orderColumn string
+	descending  bool
+	limit       int
+	offset      int
+	groupBy     []string
+	having      string
+	headEnd     int
+}
+
+// parseSelectTail parses the clause sequence after `FROM table`. The
+// canonical order is WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, OFFSET;
+// each present clause must strictly follow the previous one and carry a
+// nonempty body.
+func parseSelectTail(rest string) (selectTail, error) {
+	tail := selectTail{limit: -1, headEnd: len(rest)}
 	whereStart := indexKeyword(rest, "WHERE")
+	groupStart, groupFields := indexGroupBy(rest)
+	havingStart := indexKeyword(rest, "HAVING")
 	orderStart, orderFields := indexOrderBy(rest)
 	limitStart := indexKeyword(rest, "LIMIT")
-	if whereStart >= 0 && (orderStart >= 0 && orderStart < whereStart || limitStart >= 0 && limitStart < whereStart) ||
-		orderStart >= 0 && limitStart >= 0 && limitStart < orderStart {
-		return "", "", false, -1, errors.New("invalid SELECT clause order")
+	offsetStart := indexKeyword(rest, "OFFSET")
+	// Clause order validation: positions must strictly increase.
+	prev := -1
+	for _, pos := range []int{whereStart, groupStart, havingStart, orderStart, limitStart, offsetStart} {
+		if pos >= 0 {
+			if pos <= prev {
+				return tail, errors.New("invalid SELECT clause order")
+			}
+			prev = pos
+		}
 	}
-	end := len(rest)
-	if orderStart >= 0 && orderStart < end {
-		end = orderStart
+	for _, pos := range []int{whereStart, groupStart, havingStart, orderStart, limitStart, offsetStart} {
+		if pos >= 0 && pos < tail.headEnd {
+			tail.headEnd = pos
+		}
 	}
-	if limitStart >= 0 && limitStart < end {
-		end = limitStart
+	// clauseEnd returns the start of the first clause positioned after
+	// `from`, bounding each clause body at the next clause keyword.
+	clauseEnd := func(from int) int {
+		end := len(rest)
+		for _, pos := range []int{whereStart, groupStart, havingStart, orderStart, limitStart, offsetStart} {
+			if pos > from && pos < end {
+				end = pos
+			}
+		}
+		return end
 	}
 	if whereStart >= 0 {
-		where = strings.TrimSpace(rest[whereStart+5 : end])
-		if where == "" {
-			return "", "", false, -1, errors.New("invalid WHERE expression")
+		tail.where = strings.TrimSpace(rest[whereStart+len("WHERE") : clauseEnd(whereStart)])
+		if tail.where == "" {
+			return tail, errors.New("invalid WHERE expression")
 		}
 	}
-	if orderStart >= 0 {
-		orderEnd := len(rest)
-		if limitStart > orderStart {
-			orderEnd = limitStart
+	if groupStart >= 0 {
+		grp := strings.TrimSpace(rest[groupFields:clauseEnd(groupStart)])
+		if grp == "" {
+			return tail, errors.New("GROUP BY requires a column")
 		}
-		order := strings.Fields(strings.TrimSpace(rest[orderFields:orderEnd]))
+		for _, g := range splitVals(grp) {
+			g = strings.ToLower(strings.TrimSpace(g))
+			if g == "" {
+				return tail, errors.New("invalid GROUP BY expression")
+			}
+			tail.groupBy = append(tail.groupBy, g)
+		}
+	}
+	if havingStart >= 0 {
+		tail.having = strings.TrimSpace(rest[havingStart+len("HAVING") : clauseEnd(havingStart)])
+		if tail.having == "" {
+			return tail, errors.New("invalid HAVING expression")
+		}
+	}
+	if tail.having != "" && len(tail.groupBy) == 0 {
+		return tail, errors.New("HAVING requires GROUP BY")
+	}
+	if orderStart >= 0 {
+		order := strings.Fields(strings.TrimSpace(rest[orderFields:clauseEnd(orderStart)]))
 		if len(order) == 0 {
-			return "", "", false, -1, errors.New("ORDER BY requires a column")
+			return tail, errors.New("ORDER BY requires a column")
 		}
 		if len(order) > 2 {
-			return "", "", false, -1, errors.New("invalid ORDER BY expression")
+			return tail, errors.New("invalid ORDER BY expression")
 		}
-		orderColumn = strings.ToLower(order[0])
+		tail.orderColumn = strings.ToLower(order[0])
 		if len(order) > 1 {
 			switch strings.ToUpper(order[1]) {
 			case "ASC":
 			case "DESC":
-				descending = true
+				tail.descending = true
 			default:
-				return "", "", false, -1, errors.New("ORDER BY expects ASC or DESC")
+				return tail, errors.New("ORDER BY expects ASC or DESC")
 			}
 		}
 	}
 	if limitStart >= 0 {
-		limit, err = strconv.Atoi(strings.TrimSpace(rest[limitStart+5:]))
+		limit, err := strconv.Atoi(strings.TrimSpace(rest[limitStart+len("LIMIT") : clauseEnd(limitStart)]))
 		if err != nil || limit < 0 {
-			return "", "", false, -1, errors.New("LIMIT must be a non-negative integer")
+			return tail, errors.New("LIMIT must be a non-negative integer")
 		}
+		tail.limit = limit
 	}
-	return where, orderColumn, descending, limit, nil
+	if offsetStart >= 0 {
+		offset, err := strconv.Atoi(strings.TrimSpace(rest[offsetStart+len("OFFSET") : clauseEnd(offsetStart)]))
+		if err != nil || offset < 0 {
+			return tail, errors.New("OFFSET must be a non-negative integer")
+		}
+		tail.offset = offset
+	}
+	return tail, nil
 }
 
 func isAggregate(expression string) bool {
 	trimmed := strings.TrimSpace(expression)
-	return hasPrefixFold(trimmed, "COUNT(") || hasPrefixFold(trimmed, "SUM(") || hasPrefixFold(trimmed, "MIN(") || hasPrefixFold(trimmed, "MAX(")
+	return hasPrefixFold(trimmed, "COUNT(") || hasPrefixFold(trimmed, "SUM(") ||
+		hasPrefixFold(trimmed, "MIN(") || hasPrefixFold(trimmed, "MAX(") || hasPrefixFold(trimmed, "AVG(")
 }
 
 func aggregateResult(ctx context.Context, t *Table, expression, where string) (Result, error) {
 	trimmed := strings.TrimSpace(expression)
 	isSum := hasPrefixFold(trimmed, "SUM(")
+	isAvg := hasPrefixFold(trimmed, "AVG(")
 	isMin := hasPrefixFold(trimmed, "MIN(")
 	isMax := hasPrefixFold(trimmed, "MAX(")
+	aggName := strings.ToLower(strings.TrimSpace(expression))
 	open, close := strings.Index(expression, "("), strings.LastIndex(expression, ")")
 	if open < 0 || close <= open {
 		return Result{}, errors.New("invalid aggregate")
@@ -497,6 +696,32 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 	compiled, validCondition := compileCondition(where, t.Columns)
 	if !validCondition {
 		return Result{}, errors.New("invalid WHERE expression")
+	}
+	// COUNT(*) shortcuts: no WHERE is exactly the live row count (Order may
+	// hold tombstones, Rows cannot), and a bare `column = value` on a
+	// primary key or secondary index is a direct lookup verified with the
+	// same semantics the SELECT paths use.
+	if isCountStar {
+		if where == "" {
+			return Result{Columns: []string{aggName}, Rows: [][]any{{len(t.Rows)}}}, nil
+		}
+		if simpleColumn, simpleValue, simple := simpleEquality(where); simple {
+			if simpleColumn == t.primaryColumn() {
+				count := 0
+				if _, exists := t.Rows[simpleValue]; exists {
+					count = 1
+				}
+				return Result{Columns: []string{aggName}, Rows: [][]any{{count}}}, nil
+			}
+			if t.Indexes[simpleColumn] != nil {
+				term, termOK := simpleFastTerm(where, t)
+				count, err := t.countIndexEquality(ctx, simpleColumn, simpleValue, term, termOK, compiled)
+				if err != nil {
+					return Result{}, err
+				}
+				return Result{Columns: []string{aggName}, Rows: [][]any{{count}}}, nil
+			}
+		}
 	}
 	count := 0
 	var total float64
@@ -535,10 +760,10 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 			}
 			count++
 			switch {
-			case isSum:
+			case isSum || isAvg:
 				v, ok := numeric(value)
 				if !ok {
-					return Result{}, errors.New("SUM requires numeric values")
+					return Result{}, errors.New(aggName + " requires numeric values")
 				}
 				total += v
 			case isMin:
@@ -573,10 +798,10 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 			}
 			count++
 			switch {
-			case isSum:
+			case isSum || isAvg:
 				v, ok := numeric(value)
 				if !ok {
-					return Result{}, errors.New("SUM requires numeric values")
+					return Result{}, errors.New(aggName + " requires numeric values")
 				}
 				total += v
 			case isMin:
@@ -594,6 +819,12 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 	switch {
 	case isSum:
 		value = total
+	case isAvg:
+		if count == 0 {
+			value = nil
+		} else {
+			value = total / float64(count)
+		}
 	case isMin:
 		value = minValue
 	case isMax:
@@ -601,14 +832,61 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 	case !hasPrefixFold(trimmed, "COUNT("):
 		return Result{}, errors.New("unsupported aggregate")
 	}
-	return Result{Columns: []string{strings.ToLower(strings.TrimSpace(expression))}, Rows: [][]any{{value}}}, nil
+	return Result{Columns: []string{aggName}, Rows: [][]any{{value}}}, nil
+}
+
+// countIndexEquality counts rows matching a bare `column = value`
+// predicate through the secondary index. Candidates are verified with the
+// same logic the SELECT indexed path uses — fast-term match on the fast
+// array, conditionValueEqual on the row map, or the compiled condition —
+// so a COUNT returns exactly the number of rows SELECT would emit.
+func (t *Table) countIndexEquality(ctx context.Context, column, value string, term fastTerm, termOK bool, compiled compiledCondition) (int, error) {
+	count := 0
+	tick := &rowTicker{}
+	for key := range t.Indexes[column][value] {
+		if err := tick.tick(ctx); err != nil {
+			return 0, err
+		}
+		if termOK {
+			if fi, present := t.fastPos[key]; present && fi >= 0 && fi < len(t.fast) && t.fast[fi].key != "" {
+				if matchFastTerm(t.fast[fi].values, term) {
+					count++
+				}
+				continue
+			}
+			if row, exists := t.Rows[key]; exists && conditionValueEqual(row[column], term.expected) {
+				count++
+			}
+			continue
+		}
+		if row, exists := t.Rows[key]; exists && compiled.matchesMap(row) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // valueLess shares ordering between ORDER BY and MIN/MAX. Compare integers
 // directly so adjacent int64 values above 2^53 never collapse to one float.
+// Same-type string/bool fast paths avoid the fmt.Sprint fallback, which
+// allocated once per row comparison on TEXT and BOOL sorts.
 func valueLess(left, right any) bool {
-	if l, ok := left.(int64); ok {
+	switch l := left.(type) {
+	case int64:
 		if r, ok := right.(int64); ok {
+			return l < r
+		}
+	case string:
+		if r, ok := right.(string); ok {
+			return l < r
+		}
+	case bool:
+		// Matches the legacy "false" < "true" rendered-string ordering.
+		if r, ok := right.(bool); ok {
+			return !l && r
+		}
+	case float64:
+		if r, ok := right.(float64); ok {
 			return l < r
 		}
 	}
@@ -650,4 +928,46 @@ func selectedFastValues(row fastRow, names []string, columns map[string]int) []a
 		line = append(line, row.values[index])
 	}
 	return line
+}
+
+// satAdd adds non-negative ints, saturating at MaxInt so a LIMIT/OFFSET
+// sum can never wrap to a negative (uncapped) value.
+func satAdd(a, b int) int {
+	if a > math.MaxInt-b {
+		return math.MaxInt
+	}
+	return a + b
+}
+
+func isBlankByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// rowProjectionKey renders one projected result row as a DISTINCT dedup
+// key. Each element is written as a type tag plus a length-prefixed
+// valueKey rendering, making the encoding unambiguous across types and
+// separators ("1" vs 1, NULL vs "NULL", embedded delimiters).
+func rowProjectionKey(row []any) string {
+	var b strings.Builder
+	for _, v := range row {
+		var tag byte
+		switch v.(type) {
+		case int64:
+			tag = 'i'
+		case float64:
+			tag = 'f'
+		case string:
+			tag = 's'
+		case bool:
+			tag = 'b'
+		default:
+			tag = 'n'
+		}
+		s := valueKey(v)
+		b.WriteByte(tag)
+		b.WriteString(strconv.Itoa(len(s)))
+		b.WriteByte(':')
+		b.WriteString(s)
+	}
+	return b.String()
 }

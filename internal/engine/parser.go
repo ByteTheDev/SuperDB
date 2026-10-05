@@ -9,12 +9,15 @@ import (
 
 // Comparison operators supported in WHERE terms.
 const (
-	opEq uint8 = iota // =
-	opNe              // != or <>
-	opLt              // <
-	opLe              // <=
-	opGt              // >
-	opGe              // >=
+	opEq      uint8 = iota // =
+	opNe                   // != or <>
+	opLt                   // <
+	opLe                   // <=
+	opGt                   // >
+	opGe                   // >=
+	opIn                   // IN (...)
+	opBetween              // BETWEEN lo AND hi
+	opLike                 // LIKE 'pattern'
 )
 
 // matchWhereValue compares a stored row value against the raw (unquoted)
@@ -42,6 +45,26 @@ func matchWhereOp(rowValue any, wv string, expected any, op uint8) bool {
 		return matchWhereValue(rowValue, wv)
 	case opNe:
 		return !matchWhereValue(rowValue, wv)
+	case opIn:
+		for _, raw := range inListValues(wv) {
+			if matchWhereValue(rowValue, raw) {
+				return true
+			}
+		}
+		return false
+	case opBetween:
+		bounds, ok := expected.([]any)
+		if !ok || len(bounds) != 2 {
+			return false
+		}
+		return orderedCompare(rowValue, bounds[0], opGe) && orderedCompare(rowValue, bounds[1], opLe)
+	case opLike:
+		str, ok := rowValue.(string)
+		if !ok {
+			return false
+		}
+		pattern, _ := expected.(string)
+		return likeMatch(pattern, str)
 	}
 	return orderedCompare(rowValue, expected, op)
 }
@@ -143,12 +166,22 @@ func parseMutationWhere(s string) (column, value string, op uint8, hasWhere bool
 	if rest == "" {
 		return "", "", opEq, true, errors.New("invalid WHERE expression")
 	}
-	// Only single-term predicates are supported for mutations.
-	if indexKeyword(rest, "AND") >= 0 || indexKeyword(rest, "OR") >= 0 {
-		return "", "", opEq, true, errors.New("invalid WHERE expression")
-	}
 	lhs, op, rhs, ok := splitConditionTerm(rest)
 	if !ok {
+		lhs, op, rhs, ok = splitSpecialTerm(rest)
+		if !ok {
+			return "", "", opEq, true, errors.New("invalid WHERE expression")
+		}
+	}
+	// Only single-term predicates are supported for mutations. A BETWEEN
+	// term legitimately contains one AND (part of the operator); its
+	// bounds are validated so extra predicates cannot leak in disguised
+	// as a bound. Any other logical operator stays rejected.
+	if op == opBetween {
+		if _, _, ok := splitBetweenBounds(rhs); !ok {
+			return "", "", opEq, true, errors.New("invalid WHERE expression")
+		}
+	} else if indexKeyword(rest, "AND") >= 0 || indexKeyword(rest, "OR") >= 0 {
 		return "", "", opEq, true, errors.New("invalid WHERE expression")
 	}
 	column = strings.ToLower(strings.TrimSpace(lhs))
@@ -164,6 +197,7 @@ func splitLogical(s, operator string) []string {
 	var out []string
 	start := 0
 	quote := false
+	betweenPending := 0
 	for i := 0; i+len(needle) <= len(s); i++ {
 		if s[i] == '\'' {
 			if ni, skip := skipQuoted(s, i, quote); skip {
@@ -172,13 +206,49 @@ func splitLogical(s, operator string) []string {
 			}
 			quote = !quote
 		}
-		if !quote && foldEqualAt(s[i:], needle) {
+		if quote {
+			continue
+		}
+		// The AND inside `x BETWEEN lo AND hi` belongs to the operator,
+		// not to the predicate list, so the next AND split is skipped.
+		if operator == "AND" && isBetweenOperator(s, i) {
+			betweenPending++
+		}
+		if foldEqualAt(s[i:], needle) {
+			if betweenPending > 0 {
+				betweenPending--
+				continue
+			}
 			out = append(out, strings.TrimSpace(s[start:i]))
 			start = i + len(needle)
 			i += len(needle) - 1
 		}
 	}
 	return append(out, strings.TrimSpace(s[start:]))
+}
+
+// isBetweenOperator reports whether s[i:] opens the BETWEEN operator: a
+// word-boundary BETWEEN that is not used as a bare identifier. A column
+// literally named "between" (`between = 1`) is followed by a comparison
+// glyph, which a real BETWEEN operand never is.
+func isBetweenOperator(s string, i int) bool {
+	if i > 0 && identifierByte(s[i-1]) {
+		return false
+	}
+	if !foldEqualAt(s[i:], "BETWEEN") {
+		return false
+	}
+	j := i + len("BETWEEN")
+	if j < len(s) && identifierByte(s[j]) {
+		return false
+	}
+	for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
+		j++
+	}
+	if j >= len(s) {
+		return false
+	}
+	return s[j] != '=' && s[j] != '<' && s[j] != '>' && s[j] != '!'
 }
 
 // splitConditionTerm divides one predicate into column, operator, and raw
@@ -232,6 +302,131 @@ func opNeOrLe(c byte) uint8 {
 	return opLe
 }
 
+// splitSpecialTerm parses `column OP operand` for the keyword operators
+// IN, BETWEEN, and LIKE, which carry no comparison glyph for
+// splitConditionTerm to find. rhs keeps its raw text — a parenthesized
+// list, two AND-separated bounds, or a pattern literal — for the caller
+// to interpret per operator.
+func splitSpecialTerm(s string) (lhs string, op uint8, rhs string, ok bool) {
+	best, keyword := -1, ""
+	for _, kw := range []string{"BETWEEN", "IN", "LIKE"} {
+		if i := indexKeyword(s, kw); i >= 0 && (best < 0 || i < best) {
+			best, keyword = i, kw
+		}
+	}
+	if best < 0 {
+		return "", 0, "", false
+	}
+	switch keyword {
+	case "IN":
+		op = opIn
+	case "BETWEEN":
+		op = opBetween
+	case "LIKE":
+		op = opLike
+	}
+	return s[:best], op, s[best+len(keyword):], true
+}
+
+// literalValue resolves a raw SQL literal to a typed value for the column
+// type, mirroring the established rule: the unquoted text converts via
+// parseVal when possible and otherwise stays a raw string, preserving
+// type-mismatch no-match semantics.
+func literalValue(raw string, typ Type) any {
+	unq := unquoteLiteral(strings.TrimSpace(raw))
+	if v, err := parseVal(unq, typ); err == nil {
+		return v
+	}
+	return unq
+}
+
+// parseInList parses "(v1, v2, ...)" into typed literals for the column
+// type. The parentheses are mandatory and every element must be nonempty.
+func parseInList(raw string, typ Type) ([]any, bool) {
+	raw = strings.TrimSpace(raw)
+	if len(raw) < 2 || raw[0] != '(' || raw[len(raw)-1] != ')' {
+		return nil, false
+	}
+	vals := splitVals(raw[1 : len(raw)-1])
+	out := make([]any, 0, len(vals))
+	for _, v := range vals {
+		if strings.TrimSpace(v) == "" {
+			return nil, false
+		}
+		out = append(out, literalValue(v, typ))
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// inListValues splits a mutation-path "(a, b, c)" operand into raw
+// unquoted literal text, preserving matchWhereValue's raw-string
+// semantics for UPDATE/DELETE.
+func inListValues(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if len(raw) < 2 || raw[0] != '(' || raw[len(raw)-1] != ')' {
+		return nil
+	}
+	vals := splitVals(raw[1 : len(raw)-1])
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		out = append(out, unquoteLiteral(v))
+	}
+	return out
+}
+
+// splitBetweenBounds divides "lo AND hi" into its two bounds. Exactly one
+// top-level AND is required and no OR may appear: anything else means a
+// second predicate leaked in, which callers must reject rather than
+// silently treat as a bound.
+func splitBetweenBounds(raw string) (lo, hi string, ok bool) {
+	if indexKeyword(raw, "OR") >= 0 {
+		return "", "", false
+	}
+	parts := splitLogical(raw, "AND")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	lo, hi = strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if lo == "" || hi == "" {
+		return "", "", false
+	}
+	return lo, hi, true
+}
+
+// likeMatch implements SQL LIKE: '%' matches any run of runes (including
+// empty) and '_' matches exactly one rune. Matching is case-sensitive,
+// consistent with equality semantics elsewhere.
+func likeMatch(pattern, value string) bool {
+	p, v := []rune(pattern), []rune(value)
+	pi, vi, starP, starV := 0, 0, -1, -1
+	for vi < len(v) {
+		if pi < len(p) && (p[pi] == '_' || p[pi] == v[vi]) {
+			pi++
+			vi++
+			continue
+		}
+		if pi < len(p) && p[pi] == '%' {
+			starP, starV = pi, vi
+			pi++
+			continue
+		}
+		if starP >= 0 {
+			pi = starP + 1
+			starV++
+			vi = starV
+			continue
+		}
+		return false
+	}
+	for pi < len(p) && p[pi] == '%' {
+		pi++
+	}
+	return pi == len(p)
+}
+
 type conditionTerm struct {
 	column   string
 	expected any
@@ -256,7 +451,10 @@ func compileCondition(expression string, columns []Column) (compiledCondition, b
 		for _, conjunction := range splitLogical(disjunction, "AND") {
 			lhs, op, rhs, ok := splitConditionTerm(conjunction)
 			if !ok {
-				return nil, false
+				lhs, op, rhs, ok = splitSpecialTerm(conjunction)
+				if !ok {
+					return nil, false
+				}
 			}
 			column := strings.ToLower(strings.TrimSpace(lhs))
 			if column == "" {
@@ -273,13 +471,24 @@ func compileCondition(expression string, columns []Column) (compiledCondition, b
 			if raw == "" {
 				return nil, false
 			}
-			expected := any(unquoteLiteral(raw))
-			// parseVal on the unquoted text keeps `id >= '5'` numeric and
-			// consistent with the mutation path; when the literal does not
-			// convert the raw string stays, preserving historical
-			// type-mismatch no-match semantics.
-			if value, err := parseVal(unquoteLiteral(raw), typ); err == nil {
-				expected = value
+			var expected any
+			switch op {
+			case opIn:
+				list, ok := parseInList(raw, typ)
+				if !ok {
+					return nil, false
+				}
+				expected = list
+			case opBetween:
+				lo, hi, ok := splitBetweenBounds(raw)
+				if !ok {
+					return nil, false
+				}
+				expected = []any{literalValue(lo, typ), literalValue(hi, typ)}
+			case opLike:
+				expected = unquoteLiteral(raw)
+			default:
+				expected = literalValue(raw, typ)
 			}
 			group = append(group, conditionTerm{column: column, expected: expected, op: op})
 		}
@@ -348,6 +557,30 @@ func conditionValueCompare(actual, expected any, op uint8) bool {
 		return conditionValueEqual(actual, expected)
 	case opNe:
 		return !conditionValueEqual(actual, expected)
+	case opIn:
+		list, ok := expected.([]any)
+		if !ok {
+			return false
+		}
+		for _, item := range list {
+			if conditionValueEqual(actual, item) {
+				return true
+			}
+		}
+		return false
+	case opBetween:
+		bounds, ok := expected.([]any)
+		if !ok || len(bounds) != 2 {
+			return false
+		}
+		return orderedCompare(actual, bounds[0], opGe) && orderedCompare(actual, bounds[1], opLe)
+	case opLike:
+		pattern, ok := expected.(string)
+		if !ok {
+			return false
+		}
+		str, ok := actual.(string)
+		return ok && likeMatch(pattern, str)
 	default:
 		return orderedCompare(actual, expected, op)
 	}

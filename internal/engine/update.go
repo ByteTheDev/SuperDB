@@ -140,8 +140,19 @@ func mutationExpected(t *Table, column, value string, op uint8) (any, error) {
 	}
 	for _, col := range t.Columns {
 		if col.Name == column {
-			if op == opEq || op == opNe {
+			switch op {
+			case opEq, opNe:
 				return value, nil
+			case opIn, opLike:
+				// IN lists are re-parsed per element inside matchWhereOp
+				// with raw-string equality; LIKE patterns are used as-is.
+				return value, nil
+			case opBetween:
+				lo, hi, ok := splitBetweenBounds(value)
+				if !ok {
+					return nil, errors.New("invalid WHERE expression")
+				}
+				return []any{literalValue(lo, col.Type), literalValue(hi, col.Type)}, nil
 			}
 			if pv, err := parseVal(value, col.Type); err == nil {
 				return pv, nil

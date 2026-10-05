@@ -77,6 +77,20 @@ func parseRequestFast(payload []byte) (q request, ok bool) {
 			default:
 				return request{}, false
 			}
+		case "ping":
+			v, vOK := p.literal()
+			if !vOK {
+				return request{}, false
+			}
+			switch v {
+			case "true":
+				out.Ping = true
+			case "false":
+				out.Ping = false
+			case "null":
+			default:
+				return request{}, false
+			}
 		default:
 			if !p.skipValue() {
 				return request{}, false

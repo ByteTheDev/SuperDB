@@ -26,10 +26,15 @@ type Table struct {
 	Rows    map[string]map[string]any
 	Order   []string
 	Indexes map[string]map[string]map[string]struct{}
-	mu      sync.RWMutex
-	fast    []fastRow
-	columns map[string]int
-	fastPos map[string]int
+	// IndexNames maps each CREATE INDEX name (lowercased) to the column it
+	// indexes, so DROP INDEX can resolve names. Snapshots written before
+	// names were tracked decode a nil map; such indexes remain droppable by
+	// column name.
+	IndexNames map[string]string
+	mu         sync.RWMutex
+	fast       []fastRow
+	columns    map[string]int
+	fastPos    map[string]int
 	// dead counts stale keys left in Order by primary-key deletes and
 	// fastDead counts tombstoned entries in fast. Both are reaped by
 	// compaction once they reach a quarter of their slice. They are

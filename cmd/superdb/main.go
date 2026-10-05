@@ -234,14 +234,27 @@ func runServer(args []string, globalProduction bool) {
 		log.Fatal(e)
 	}
 	defer ln.Close()
+	// Graceful shutdown: SIGINT/SIGTERM closes the listener so the accept
+	// loop exits and deferred cleanup (WAL writer close, cluster shutdown)
+	// runs normally instead of dying mid-write.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
 	for {
 		c, e := ln.Accept()
 		if e != nil {
+			if ctx.Err() != nil {
+				break
+			}
 			log.Print(e)
 			continue
 		}
 		go server.HandleWithOptions(c, db, *mode, *data, server.HandleOptions{Production: *production, WALWriter: walWriter, Cluster: clusterExec, AuthKey: *authKey, Limits: limits, Limiter: limiter})
 	}
+	log.Print("SuperDB shut down cleanly")
 }
 
 // runServe starts the hosted SDB1 network server:
@@ -343,8 +356,19 @@ func runAutomaticBackups(dir string, interval time.Duration, db *engine.Database
 
 func runStatus(args []string) {
 	fs, data, addr, mode := flags("status", args)
+	authKey := fs.String("auth-key", "", "access key for the live probe (or SUPERDB_AUTH_KEY)")
 	fs.Parse(args)
+	if *authKey == "" {
+		*authKey = os.Getenv("SUPERDB_AUTH_KEY")
+	}
 	fmt.Printf("SuperDB status\n  data: %s\n  address: %s\n  mode: %s\n", *data, *addr, *mode)
+	// Live probe: the server answers {"ping":true} without auth, so this
+	// works against key-protected instances too.
+	if err := server.Ping(*addr, *authKey, 800*time.Millisecond); err != nil {
+		fmt.Printf("  server: not reachable (%v)\n", err)
+	} else {
+		fmt.Printf("  server: reachable at %s\n", *addr)
+	}
 	for _, name := range []string{storage.SnapshotPath(*data), storage.WALPath(*data)} {
 		info, err := os.Stat(name)
 		if os.IsNotExist(err) {

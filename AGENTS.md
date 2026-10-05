@@ -17,15 +17,26 @@ Module: `superdb`. Main programs:
 cmd/superdb/main.go              Server/admin command entry point
 cmd/superdb-cli/main.go          Client flags and entry point
 cmd/superdb-cli/client.go        TCP framing, batching, responses
-internal/engine/database.go      Dispatch, locking, clone/replace
+internal/engine/database.go      Dispatch, locking, clone/replace, IsReadOnly
 internal/engine/types.go         Database, table, column, result types
-internal/engine/parser.go        Shared SQL parsing/literals
+internal/engine/parser.go        Shared SQL parsing/literals + WHERE ops (IN/BETWEEN/LIKE)
+internal/engine/fold.go          ASCII case-folding keyword helpers
 internal/engine/create.go        CREATE TABLE
-internal/engine/schema.go        CREATE INDEX and ALTER/schema changes
-internal/engine/insert.go        INSERT
-internal/engine/select.go        SELECT, filters, ordering, limits, aggregates
+internal/engine/schema.go        CREATE INDEX, ALTER ADD/DROP COLUMN, index helpers
+internal/engine/drop.go          DROP TABLE, DROP INDEX, TRUNCATE
+internal/engine/meta.go          SHOW TABLES/COLUMNS/INDEX, DESCRIBE (read-only)
+internal/engine/insert.go        INSERT, INSERT OR REPLACE, INSERT INTO ... SELECT
+internal/engine/insertfast.go    Single-pass VALUES parser
+internal/engine/select.go        SELECT, filters, ordering, limits, DISTINCT, aggregates
+internal/engine/group.go         GROUP BY + HAVING execution
+internal/engine/orderby.go       ORDER BY key sorting
 internal/engine/update.go        UPDATE
 internal/engine/delete.go        DELETE
+internal/engine/fastpath.go      Large-table fast row array + PK/synthetic keys
+internal/engine/clone.go         Direct deep-copy clone for transactions
+internal/engine/dbjson.go        Streaming snapshot JSON encoder
+internal/engine/bind.go          Parameter binding helpers
+internal/engine/marshal.go       Result JSON encoding
 internal/engine/cancel.go        Per-statement cancellation checks in scan loops
 internal/engine/snapshot.go      JSON snapshot serialization
 internal/server/server.go        TCP lifecycle and SQL sessions
@@ -158,10 +169,22 @@ Supported statements include:
 CREATE TABLE users (id INT PRIMARY KEY, name TEXT, score FLOAT, active BOOL);
 CREATE INDEX users_name ON users (name);
 ALTER TABLE users ADD COLUMN email TEXT;
+ALTER TABLE users DROP COLUMN email;
+DROP TABLE users; DROP TABLE IF EXISTS users;
+DROP INDEX users_name ON users;
+TRUNCATE users;
+SHOW TABLES; SHOW COLUMNS FROM users; SHOW INDEX FROM users;
+DESCRIBE users; DESC users;
 INSERT INTO users VALUES (1, 'Ada', 10.5, true);
 INSERT INTO users VALUES (2, 'Grace', 9.5, false), (3, 'Linus', 8.0, true);
+INSERT OR REPLACE INTO users VALUES (1, 'Ada', 11.0, true);
+INSERT INTO archive SELECT * FROM users WHERE score < 9;
 SELECT * FROM users;
-SELECT id, name FROM users WHERE score >= 9 ORDER BY score DESC LIMIT 10;
+SELECT DISTINCT name FROM users;
+SELECT id, name FROM users WHERE score >= 9 ORDER BY score DESC LIMIT 10 OFFSET 5;
+SELECT id FROM users WHERE id IN (1, 3, 5) OR name LIKE 'A%';
+SELECT id FROM users WHERE score BETWEEN 8 AND 10;
+SELECT dept, COUNT(*), AVG(score) FROM users GROUP BY dept HAVING COUNT(*) > 1;
 SELECT COUNT(*) FROM users WHERE active = true;
 UPDATE users SET active = false WHERE id = 1;
 DELETE FROM users WHERE id = 1;
@@ -176,13 +199,19 @@ Important behavior:
 
 - Primary keys use direct lookup fast paths. Tables without a PRIMARY KEY insert rows under synthetic `#N` keys (in-memory counter; restored tables skip collisions) and keep insertion order.
 - Secondary indexes must stay correct after insert, update, delete, clone, and replace.
-- WHERE, ordering, limits, aggregates, and logical predicates are only the implemented subset of SQL. WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=` combined with AND/OR; ordered comparisons use the column's declared type. Single quotes inside literals escape as `''` and are decoded on parse (BindParams round-trips them).
+- WHERE, ordering, limits, aggregates, and logical predicates are only the implemented subset of SQL. WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `IN (...)`, `BETWEEN lo AND hi`, and `LIKE` combined with AND/OR; ordered comparisons use the column's declared type. UPDATE/DELETE accept a single WHERE term (a BETWEEN term's internal AND is allowed; other multi-term predicates are rejected). Single quotes inside literals escape as `''` and are decoded on parse (BindParams round-trips them).
 - Predicates, ORDER BY columns, and aggregate arguments must reference real columns; unknown columns are errors on every path (SELECT, UPDATE, DELETE, aggregates).
-- SELECT clause order is WHERE, ORDER BY, LIMIT; reject empty WHERE clauses and misordered clauses without panicking. Keyword searches must skip quoted literals and identifier substrings.
-- Ordered predicates must agree across small-table, large-table, and indexed paths. MIN/MAX compare numeric values numerically; integer sorting preserves int64 precision. COUNT(column) excludes NULL; COUNT(*) counts all matching rows.
+- SELECT clause order is WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, OFFSET; reject empty clauses and misordered clauses without panicking. FROM names exactly one table: aliases, comma lists, and JOINs are rejected. Keyword searches must skip quoted literals and identifier substrings.
+- Ordered predicates must agree across small-table, large-table, and indexed paths. MIN/MAX compare numeric values numerically; integer sorting preserves int64 precision. COUNT(column) excludes NULL; COUNT(*) counts all matching rows; AVG skips NULLs and returns NULL over an all-NULL set.
+- GROUP BY select lists may mix grouping columns and aggregates (COUNT/SUM/MIN/MAX/AVG); non-grouped non-aggregate columns are rejected. HAVING compiles against a synthetic row of group columns plus aggregate results, so the full WHERE operator set works there.
+- DISTINCT dedups projected rows via a type-tagged, length-prefixed key; it composes with WHERE, ORDER BY, LIMIT, OFFSET, and the fast path.
+- INSERT OR REPLACE upserts in place: existing keys keep their Order position while row, index entries, and fast values swap. INSERT INTO ... SELECT materializes the source before locking the destination (self-insert safe, MaxRows applies to the source scan).
+- Index names from CREATE INDEX are stored in Table.IndexNames (name → column) for DROP INDEX; snapshots lacking the field decode an empty map and such indexes drop by column name.
+- DROP TABLE/INDEX, ALTER DROP COLUMN, and TRUNCATE are writes: they take the commit path, reach the WAL, and replicate through Raft. SHOW/DESCRIBE are reads everywhere — engine.IsReadOnly is the single classifier local persistence, hosted sessions, and cluster isRead share.
 - Transactions are session-local clones until COMMIT.
 - WAL records mutating SQL, not reads.
 - Batches execute and return results in order. `{"sqls":[...],"atomic":true}` is all-or-nothing locally too (clone + CommitFrom, persist-before-publish); it is rejected inside an open session transaction.
+- Not supported: JOINs, subqueries, expressions in select lists/SET, multi-column indexes, multi-table FROM.
 
 Before adding SQL, inspect existing parser helpers and add tests for valid syntax, invalid syntax, type conversion, indexes, and persistence/replay.
 

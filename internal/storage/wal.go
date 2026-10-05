@@ -25,6 +25,11 @@ func AppendWALBatch(path string, sqls []string) error {
 	return writer.Append(sqls)
 }
 
+// walEncodePool recycles WAL encode buffers. Buffers up to 4 MiB are
+// retained; larger batch payloads are left to the GC so a single huge
+// request cannot pin an oversized backing array in the pool.
+var walEncodePool = sync.Pool{New: func() any { return make([]byte, 0, 64<<10) }}
+
 // WALWriter keeps a WAL file open and serializes durable batch appends.
 type WALWriter struct {
 	mu   sync.Mutex
@@ -53,7 +58,15 @@ func (w *WALWriter) Append(sqls []string) error {
 		}
 		total += headerSize + len(sql)
 	}
-	encoded := make([]byte, 0, total)
+	encoded := walEncodePool.Get().([]byte)[:0]
+	if cap(encoded) < total {
+		encoded = make([]byte, 0, total)
+	}
+	defer func() {
+		if cap(encoded) <= 4<<20 {
+			walEncodePool.Put(encoded[:0])
+		}
+	}()
 	for _, sql := range sqls {
 		encoded = append(encoded, magic...)
 		encoded = append(encoded, walKind, walVersion, 0, 0)

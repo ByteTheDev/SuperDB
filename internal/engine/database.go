@@ -55,6 +55,17 @@ func (d *Database) ExecContext(ctx context.Context, sql string) (Result, error) 
 	return d.ExecWithOptions(ctx, sql, ExecOptions{})
 }
 
+// IsReadOnly reports whether a statement only reads database state:
+// SELECT plus the introspection statements SHOW, DESCRIBE, and DESC.
+// Callers use it to decide durability (only writes reach the WAL) and
+// write-lock admission. Anything unrecognized classifies as a write,
+// matching the historical "not SELECT" rule.
+func IsReadOnly(sql string) bool {
+	s := strings.TrimSpace(sql)
+	return hasPrefixFold(s, "SELECT") || hasPrefixFold(s, "SHOW") ||
+		hasPrefixFold(s, "DESCRIBE") || hasPrefixFold(s, "DESC")
+}
+
 // ExecWithOptions executes one statement honoring ctx cancellation and
 // opts limits. Cancellation while waiting on internal mutexes is not
 // preemptible; it takes effect once the lock is acquired and at scan
@@ -63,7 +74,7 @@ func (d *Database) ExecWithOptions(ctx context.Context, sql string, opts ExecOpt
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	write := !hasPrefixFold(strings.TrimSpace(sql), "SELECT")
+	write := !IsReadOnly(sql)
 	if write {
 		d.commitMu.Lock()
 		defer d.commitMu.Unlock()
@@ -91,10 +102,16 @@ func (d *Database) exec(ctx context.Context, sql string, opts ExecOptions) (Resu
 		return d.createIndex(ctx, s)
 	case hasPrefixFold(s, "ALTER TABLE"):
 		return d.alterTable(ctx, s)
-	case hasPrefixFold(s, "INSERT INTO"):
-		return d.insert(ctx, s)
+	case hasPrefixFold(s, "DROP TABLE") || hasPrefixFold(s, "DROP INDEX"):
+		return d.drop(s)
+	case hasPrefixFold(s, "TRUNCATE"):
+		return d.truncate(ctx, s)
+	case hasPrefixFold(s, "INSERT"):
+		return d.insert(ctx, s, opts.MaxRows)
 	case hasPrefixFold(s, "SELECT"):
 		return d.selectRows(ctx, s, opts.MaxRows)
+	case hasPrefixFold(s, "SHOW") || hasPrefixFold(s, "DESC"):
+		return d.meta(s)
 	case hasPrefixFold(s, "UPDATE"):
 		return d.update(ctx, s)
 	case hasPrefixFold(s, "DELETE FROM"):

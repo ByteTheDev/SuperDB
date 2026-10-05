@@ -118,6 +118,23 @@ func (t *Table) nextSyntheticKeyLocked() string {
 	}
 }
 
+// replaceFastRowLocked swaps the full value array of an existing key for
+// INSERT OR REPLACE, keeping the row's position. Caller holds t.mu.
+func (t *Table) replaceFastRowLocked(key string, row map[string]any) {
+	if len(t.fast) == 0 {
+		return
+	}
+	rowIndex, ok := t.fastPos[key]
+	if !ok {
+		return
+	}
+	values := make([]any, len(t.Columns))
+	for i, column := range t.Columns {
+		values[i] = row[column.Name]
+	}
+	t.fast[rowIndex].values = values
+}
+
 func (t *Table) updateFastRowLocked(key, column string, value any) {
 	if len(t.fast) == 0 {
 		return

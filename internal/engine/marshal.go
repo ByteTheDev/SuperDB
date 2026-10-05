@@ -83,6 +83,14 @@ func appendJSONStringArray(out []byte, values []string) []byte {
 	return append(out, ']')
 }
 
+// AppendJSONValue appends the JSON encoding of one scalar row value,
+// identical to encoding/json for the types the engine produces
+// (int64, float64, string, bool, nil); other types fall back to the
+// standard library. Exported for the hosted server's response encoder.
+func AppendJSONValue(out []byte, v any) ([]byte, error) {
+	return appendJSONValue(out, v)
+}
+
 func appendJSONValue(out []byte, v any) ([]byte, error) {
 	switch t := v.(type) {
 	case nil:
@@ -122,6 +130,10 @@ func appendJSONFloat(out []byte, f float64) ([]byte, error) {
 }
 
 const lowerHex = "0123456789abcdef"
+
+// AppendJSONString appends s as a quoted JSON string with the exact
+// escaping of encoding/json (including HTML escaping of <, >, and &).
+func AppendJSONString(out []byte, s string) []byte { return appendJSONString(out, s) }
 
 // appendJSONString appends s quoted with the exact escaping of
 // encoding/json (including HTML escaping of <, >, and &).

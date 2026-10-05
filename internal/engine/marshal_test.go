@@ -84,7 +84,7 @@ func normalizeRows(rows [][]any) [][]any {
 	return out
 }
 
-func mustExec(t *testing.T, d *Database, sql string) {
+func mustExec(t testing.TB, d *Database, sql string) {
 	t.Helper()
 	if _, err := d.Exec(sql); err != nil {
 		t.Fatalf("%s: %v", sql, err)

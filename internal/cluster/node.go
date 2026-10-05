@@ -302,39 +302,60 @@ func (n *Node) waitLeader(d time.Duration) error {
 
 func (n *Node) join(ctx context.Context) error {
 	var lastErr error
-	for _, seed := range n.cfg.JoinAddrs {
-		var meta metadataPayload
-		cctx, cancel := context.WithTimeout(ctx, n.cfg.PingTimeout)
-		err := n.xport.Call(cctx, seed, KindMetadata, nil, &meta)
-		cancel()
-		if err != nil {
-			lastErr = err
-			continue
+	// Joins race leader elections: the leader a seed reports can lose
+	// leadership before the join lands, and the target may not know the
+	// next leader yet. Retry the whole seed pass until a bounded deadline
+	// instead of failing on a transient election gap.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, seed := range n.cfg.JoinAddrs {
+			var meta metadataPayload
+			cctx, cancel := context.WithTimeout(ctx, n.cfg.PingTimeout)
+			err := n.xport.Call(cctx, seed, KindMetadata, nil, &meta)
+			cancel()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if meta.ClusterID == "" {
+				lastErr = NewError(CodeClusterMismatch, "seed returned no cluster id")
+				continue
+			}
+			n.identity.ClusterID = meta.ClusterID
+			n.ranges.ReplaceBulk(meta.Ranges)
+			n.members.MergeBulk(meta.Members)
+			target := seed
+			if meta.LeaderAddr != "" {
+				target = meta.LeaderAddr
+			}
+			jm := joinPayload{
+				Member:    Member{ID: n.identity.NodeID, Addr: n.cfg.AdvertiseAddr, State: StateAlive, LastSeen: time.Now(), Version: 1, Region: n.cfg.Region},
+				ClusterID: meta.ClusterID,
+			}
+			cctx2, cancel2 := context.WithTimeout(ctx, n.cfg.PingTimeout)
+			jerr := n.xport.Call(cctx2, target, KindJoin, jm, nil)
+			cancel2()
+			if jerr != nil {
+				if ce, ok := AsError(jerr); ok && ce.Code == CodeClusterMismatch {
+					return jerr
+				}
+				lastErr = jerr
+				continue
+			}
+			n.members.UpsertMember(Member{ID: n.identity.NodeID, Addr: n.cfg.AdvertiseAddr, State: StateAlive, LastSeen: time.Now(), Version: 1, Region: n.cfg.Region})
+			return nil
 		}
-		if meta.ClusterID == "" {
-			lastErr = NewError(CodeClusterMismatch, "seed returned no cluster id")
-			continue
+		if len(n.cfg.JoinAddrs) == 0 {
+			break
 		}
-		n.identity.ClusterID = meta.ClusterID
-		n.ranges.ReplaceBulk(meta.Ranges)
-		n.members.MergeBulk(meta.Members)
-		target := seed
-		if meta.LeaderAddr != "" {
-			target = meta.LeaderAddr
+		select {
+		case <-ctx.Done():
+			if lastErr == nil {
+				lastErr = ctx.Err()
+			}
+			return lastErr
+		case <-time.After(200 * time.Millisecond):
 		}
-		jm := joinPayload{
-			Member:    Member{ID: n.identity.NodeID, Addr: n.cfg.AdvertiseAddr, State: StateAlive, LastSeen: time.Now(), Version: 1, Region: n.cfg.Region},
-			ClusterID: meta.ClusterID,
-		}
-		cctx2, cancel2 := context.WithTimeout(ctx, n.cfg.PingTimeout)
-		jerr := n.xport.Call(cctx2, target, KindJoin, jm, nil)
-		cancel2()
-		if jerr != nil {
-			lastErr = jerr
-			continue
-		}
-		n.members.UpsertMember(Member{ID: n.identity.NodeID, Addr: n.cfg.AdvertiseAddr, State: StateAlive, LastSeen: time.Now(), Version: 1, Region: n.cfg.Region})
-		return nil
 	}
 	if lastErr == nil {
 		lastErr = NewError(CodeUnavailable, "no join addresses")
@@ -442,7 +463,7 @@ func (n *Node) forwardRemove(ctx context.Context, addr, id string) error {
 // --- write / read paths ---
 
 func isRead(sql string) bool {
-	return sqlKeywordIs(sql, "SELECT")
+	return engine.IsReadOnly(sql)
 }
 
 // sqlKeywordIs reports whether the first keyword of sql equals keyword
@@ -1125,7 +1146,7 @@ func (n *Node) registerHandlers() {
 		if !n.rn.IsLeader() {
 			_, addr := n.rn.Leader()
 			if addr == "" {
-				return nil, NewError(CodeNoLeader, "no leader to admit join")
+				return nil, &Error{Code: CodeNoLeader, Message: "no leader to admit join", Retryable: true}
 			}
 			return nil, &Error{Code: CodeNoLeader, Message: "join via leader " + string(addr), Retryable: true}
 		}

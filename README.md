@@ -165,25 +165,45 @@ See [docs/cluster.md](docs/cluster.md) for the honest implemented-vs-planned spl
 
 ## Supported SQL
 
-`CREATE TABLE`, `INSERT`, `SELECT`, `UPDATE`, `DELETE`, `BEGIN`, `COMMIT`, and `ROLLBACK`.
+Schema and DDL: `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ... ADD COLUMN`,
+`ALTER TABLE ... DROP COLUMN`, `DROP TABLE [IF EXISTS]`, `DROP INDEX name ON t`,
+and `TRUNCATE`.
 
-The v1 query engine intentionally focuses on primary-key equality and simple literal filters.
+Introspection: `SHOW TABLES`, `SHOW COLUMNS FROM t`, `SHOW INDEX[ES] FROM t`,
+`DESCRIBE t` / `DESC t` — all read-only (they never reach the WAL and run as
+local reads in cluster mode).
 
-WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, and `>=` across SELECT,
-UPDATE, DELETE, and aggregate queries, combined with `AND`/`OR`. Ordered
-comparisons use each column's declared type (INT/FLOAT numerically, TEXT
-lexically). Predicates on unknown columns, unknown `ORDER BY` columns, and
-aggregates over unknown columns return errors instead of silently matching
-nothing. Single quotes inside text literals escape as `''`. Tables may omit
-`PRIMARY KEY`; such tables insert rows under synthetic keys and preserve
+Writes: `INSERT ... VALUES`, `INSERT OR REPLACE ... VALUES` (upsert: existing
+keys keep their row position), `INSERT INTO t SELECT ...` (the source result is
+materialized before the destination locks, so self-inserts can't deadlock),
+`UPDATE`, `DELETE`, `BEGIN`, `COMMIT`, `ROLLBACK`.
+
+Reads: `SELECT` with `DISTINCT`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`,
+`LIMIT`, and `OFFSET` — clauses must appear in that order.
+
+WHERE terms support `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `IN (...)`,
+`BETWEEN lo AND hi` (inclusive), and `LIKE` (`%` and `_` wildcards, case
+sensitive) across SELECT, UPDATE, DELETE, and aggregate queries, combined with
+`AND`/`OR`. Ordered comparisons use each column's declared type (INT/FLOAT
+numerically, TEXT lexically). Predicates on unknown columns, unknown `ORDER BY`
+columns, and aggregates over unknown columns return errors instead of silently
+matching nothing. Single quotes inside text literals escape as `''`. Tables may
+omit `PRIMARY KEY`; such tables insert rows under synthetic keys and preserve
 insertion order.
 
-SELECT clauses follow `WHERE`, `ORDER BY`, then `LIMIT`; empty predicates and
-misordered clauses return errors. Clause keywords inside text literals or longer
-identifiers are not treated as SQL syntax. Numeric `MIN`/`MAX` and integer sorting
-use numeric order without losing integer precision. `COUNT(column)` excludes
-NULL values, while `COUNT(*)` includes every matching row. Ordered filters work
-with both small tables and the large-table fast path.
+Aggregates `COUNT`, `SUM`, `MIN`, `MAX`, and `AVG` work bare (`SELECT COUNT(*) ...`)
+and grouped (`SELECT dept, COUNT(*) ... GROUP BY dept HAVING ...`). `GROUP BY`
+select lists may mix grouping columns and aggregates; `HAVING` evaluates the same
+operator set as `WHERE` against group results. Numeric `MIN`/`MAX` and integer
+sorting use numeric order without losing integer precision. `COUNT(column)`
+excludes NULL values, while `COUNT(*)` includes every matching row; `AVG` and
+`SUM` skip NULLs and `AVG` over no non-NULL rows returns NULL. Ordered filters
+work with both small tables and the large-table fast path.
+
+Not supported: JOINs, subqueries, expressions in select lists or `SET`,
+transactions spanning multiple connections, and `CREATE INDEX` on multiple
+columns. A query may name only one table in `FROM`; aliases and comma-separated
+tables are rejected rather than silently scanning one table.
 
 Batch requests (`{"sqls": [...]}`) run each statement in order. Adding
 `"atomic": true` makes the batch all-or-nothing in both local and cluster

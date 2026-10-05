@@ -37,6 +37,10 @@ type request struct {
 	// mode (single Raft entry); in local mode the batch still stops at the
 	// first error but earlier statements are NOT rolled back.
 	Atomic bool `json:"atomic,omitempty"`
+	// Ping asks for a liveness response without executing SQL. It carries
+	// no query and is answered before authentication so operators can
+	// probe auth-protected servers; it reveals nothing beyond reachability.
+	Ping bool `json:"ping,omitempty"`
 }
 
 func readRequest(r *bufio.Reader, maxBytes int) (request, error) {
@@ -87,7 +91,7 @@ func readRequest(r *bufio.Reader, maxBytes int) (request, error) {
 		q.Auth = q.AuthKey
 	}
 	q.AuthKey = ""
-	if q.SQL == "" && len(q.SQLs) == 0 {
+	if q.SQL == "" && len(q.SQLs) == 0 && !q.Ping {
 		return request{}, errors.New("request must contain sql or sqls")
 	}
 	return q, nil

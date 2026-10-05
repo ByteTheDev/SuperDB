@@ -9,48 +9,19 @@ import (
 type databaseImage struct{ Tables map[string]*Table }
 
 // MarshalJSON provides a consistent image for snapshots and live backups.
-// Tables are deep-copied under their read locks so the JSON encoding runs
-// without holding database locks and concurrent mutations cannot race the
-// marshal (which would otherwise risk concurrent map access panics).
+// The database is encoded directly while gate is held — no statement can be
+// in flight, so the stream sees one atomic image without paying for a
+// deep copy plus a reflection walk. Output is byte-compatible with the
+// previous copy-then-marshal path (same shape, sorted keys).
 func (d *Database) MarshalJSON() ([]byte, error) {
-	// gate.Lock excludes concurrent Exec/Clone/replace publishers while the
-	// image is copied; the JSON encoding itself runs lock-free afterwards.
+	// gate.Lock excludes concurrent Exec/Clone/replace publishers for the
+	// whole encode; each table's read lock is still taken while it is
+	// written out.
 	d.gate.Lock()
+	defer d.gate.Unlock()
 	d.mu.RLock()
-	tables := make(map[string]*Table, len(d.Tables))
-	for name, t := range d.Tables {
-		t.mu.RLock()
-		cp := &Table{
-			Name:    t.Name,
-			Columns: append([]Column(nil), t.Columns...),
-			Rows:    make(map[string]map[string]any, len(t.Rows)),
-			Order:   append([]string(nil), t.Order...),
-			Indexes: make(map[string]map[string]map[string]struct{}, len(t.Indexes)),
-		}
-		for key, row := range t.Rows {
-			rcp := make(map[string]any, len(row))
-			for k, v := range row {
-				rcp[k] = v
-			}
-			cp.Rows[key] = rcp
-		}
-		for column, idx := range t.Indexes {
-			icp := make(map[string]map[string]struct{}, len(idx))
-			for val, members := range idx {
-				mcp := make(map[string]struct{}, len(members))
-				for m := range members {
-					mcp[m] = struct{}{}
-				}
-				icp[val] = mcp
-			}
-			cp.Indexes[column] = icp
-		}
-		t.mu.RUnlock()
-		tables[name] = cp
-	}
-	d.mu.RUnlock()
-	d.gate.Unlock()
-	return json.Marshal(databaseImage{Tables: tables})
+	defer d.mu.RUnlock()
+	return appendDatabaseJSON(make([]byte, 0, snapshotEstimate(d)), d), nil
 }
 
 func (d *Database) Snapshot() ([]byte, error) { return d.MarshalJSON() }
@@ -74,6 +45,9 @@ func (d *Database) UnmarshalJSON(b []byte) error {
 		}
 		if t.Indexes == nil {
 			t.Indexes = make(map[string]map[string]map[string]struct{})
+		}
+		if t.IndexNames == nil {
+			t.IndexNames = make(map[string]string)
 		}
 		for _, row := range t.Rows {
 			if row == nil {
@@ -125,17 +99,14 @@ func (d *Database) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Clone returns a private, execution-ready deep copy of the database.
+// The copy is made in memory — no JSON round-trip — but preserves the
+// same end state the old encode/decode path produced: rebuilt-ready
+// tables with indexes, fast paths, and counters intact.
 func (d *Database) Clone() (*Database, error) {
 	d.commitMu.Lock()
 	defer d.commitMu.Unlock()
-	b, err := d.Snapshot()
-	if err != nil {
-		return nil, err
-	}
-	clone := New()
-	if err := json.Unmarshal(b, clone); err != nil {
-		return nil, fmt.Errorf("clone database: %w", err)
-	}
+	clone := cloneImage(d)
 	clone.baseRevision = d.revision.Load()
 	return clone, nil
 }
@@ -151,14 +122,11 @@ func (d *Database) CommitFrom(source *Database, persist func(*Database) error) e
 }
 
 func (d *Database) replace(source *Database, check bool, persist func(*Database) error) error {
-	b, err := source.Snapshot()
-	if err != nil {
-		return err
-	}
-	clone := New()
-	if err := json.Unmarshal(b, clone); err != nil {
-		return fmt.Errorf("replace database: %w", err)
-	}
+	// The publishable image is a private deep copy of source. It is made
+	// before any destination lock is taken, and source's own locks are
+	// taken and released inside cloneImage, so a source == destination
+	// call cannot deadlock on held locks.
+	clone := cloneImage(source)
 	d.commitMu.Lock()
 	defer d.commitMu.Unlock()
 	if check && d.revision.Load() != source.baseRevision {

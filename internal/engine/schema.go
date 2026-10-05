@@ -38,6 +38,12 @@ func (d *Database) createIndex(ctx context.Context, s string) (Result, error) {
 	if _, exists := t.Indexes[column]; exists {
 		return Result{}, errors.New("index already exists for column")
 	}
+	if t.IndexNames == nil {
+		t.IndexNames = make(map[string]string)
+	}
+	if _, exists := t.IndexNames[strings.ToLower(indexName)]; exists {
+		return Result{}, errors.New("index name already exists")
+	}
 	index := make(map[string]map[string]struct{})
 	tick := &rowTicker{}
 	for key, row := range t.Rows {
@@ -51,6 +57,7 @@ func (d *Database) createIndex(ctx context.Context, s string) (Result, error) {
 		index[value][key] = struct{}{}
 	}
 	t.Indexes[column] = index
+	t.IndexNames[strings.ToLower(indexName)] = column
 	return Result{Message: "index created"}, nil
 }
 
@@ -76,8 +83,18 @@ func valueKey(value any) string {
 
 func (d *Database) alterTable(ctx context.Context, s string) (Result, error) {
 	parts := strings.Fields(s)
+	if len(parts) >= 4 && strings.EqualFold(parts[3], "DROP") {
+		i := 4
+		if i < len(parts) && strings.EqualFold(parts[i], "COLUMN") {
+			i++
+		}
+		if len(parts) != i+1 {
+			return Result{}, errors.New("invalid ALTER TABLE ... DROP COLUMN")
+		}
+		return d.dropColumn(ctx, parts[2], parts[i])
+	}
 	if len(parts) != 7 || !strings.EqualFold(parts[3], "ADD") || !strings.EqualFold(parts[4], "COLUMN") {
-		return Result{}, errors.New("only ALTER TABLE ... ADD COLUMN is supported")
+		return Result{}, errors.New("only ALTER TABLE ... ADD COLUMN or DROP COLUMN is supported")
 	}
 	t, err := d.table(parts[2])
 	if err != nil {

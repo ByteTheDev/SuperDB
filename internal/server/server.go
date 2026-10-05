@@ -71,6 +71,15 @@ func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, optio
 		if err != nil {
 			return
 		}
+		if q.Ping {
+			// Liveness probe: answered before auth so operators can check
+			// reachability of key-protected servers. Mirrors the hosted
+			// server's TypePing, which is likewise unauthenticated.
+			if err := writeResponse(w, map[string]string{"status": "ok"}); err != nil {
+				return
+			}
+			continue
+		}
 		if !checkAuth(q.Auth, options.AuthKey) {
 			out := map[string]string{"error": "unauthorized: invalid or missing auth key"}
 			if err := writeResponse(w, out); err != nil {
@@ -319,25 +328,12 @@ func checkAuth(supplied, required string) bool {
 	return subtle.ConstantTimeCompare([]byte(supplied), []byte(required)) == 1
 }
 
-// isWriteSQL mirrors engine.Database.Exec's read classification: only
-// SELECT statements skip durability. Everything else (including invalid
-// SQL, which never reaches persistence because Exec errors first) is a
-// write.
+// isWriteSQL mirrors engine.IsReadOnly: read-only statements (SELECT and
+// the SHOW/DESCRIBE introspection forms) skip durability. Everything else
+// (including invalid SQL, which never reaches persistence because Exec
+// errors first) is a write.
 func isWriteSQL(raw string) bool {
-	s := strings.TrimSpace(raw)
-	if len(s) < 6 {
-		return true
-	}
-	for i := 0; i < 6; i++ {
-		c := s[i]
-		if 'a' <= c && c <= 'z' {
-			c -= 'a' - 'A'
-		}
-		if c != "SELECT"[i] {
-			return true
-		}
-	}
-	return false
+	return !engine.IsReadOnly(raw)
 }
 
 // writeStatements drops read-only statements from a recorded batch so the

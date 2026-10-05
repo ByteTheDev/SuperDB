@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"superdb/internal/engine"
 	"sync/atomic"
 	"time"
 )
@@ -32,7 +33,7 @@ func (s *Stats) Observe(sql string, d time.Duration, forwarded bool, failed bool
 	if failed {
 		s.errors.Add(1)
 	}
-	if sqlKeywordIs(sql, "SELECT") {
+	if engine.IsReadOnly(sql) {
 		s.reads.Add(1)
 	} else {
 		s.writes.Add(1)
