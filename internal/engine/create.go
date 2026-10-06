@@ -17,15 +17,34 @@ func (d *Database) create(s string) (Result, error) {
 	}
 	name := strings.ToLower(head[2])
 	cols := []Column{}
+	seen := make(map[string]struct{}, 8)
+	primaryCount := 0
 	for _, part := range strings.Split(s[a+1:z], ",") {
 		f := strings.Fields(strings.TrimSpace(part))
 		if len(f) < 2 {
 			return Result{}, errors.New("invalid column")
 		}
-		c := Column{Name: strings.ToLower(f[0]), Type: Type(strings.ToUpper(f[1]))}
+		colName := strings.ToLower(f[0])
+		if _, dup := seen[colName]; dup {
+			return Result{}, errors.New("duplicate column")
+		}
+		seen[colName] = struct{}{}
+		colType := Type(strings.ToUpper(f[1]))
+		switch colType {
+		case Int, Float, Text, Bool:
+		default:
+			return Result{}, errors.New("invalid column type")
+		}
+		c := Column{Name: colName, Type: colType}
 		for _, x := range f[2:] {
 			if strings.EqualFold(x, "PRIMARY") {
 				c.Primary = true
+			}
+		}
+		if c.Primary {
+			primaryCount++
+			if primaryCount > 1 {
+				return Result{}, errors.New("multiple primary keys")
 			}
 		}
 		cols = append(cols, c)

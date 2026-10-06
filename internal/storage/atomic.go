@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -16,9 +17,12 @@ func atomicWrite(path string, data []byte) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if _, err := tmp.Write(data); err != nil {
+	if n, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
+	} else if n != len(data) {
+		tmp.Close()
+		return errors.New("short snapshot write")
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()

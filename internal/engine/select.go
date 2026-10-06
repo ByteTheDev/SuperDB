@@ -68,6 +68,11 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 		}
 		return r, err
 	}
+	for _, n := range names {
+		if !hasColumn(t.Columns, n) {
+			return Result{}, fmt.Errorf("column not found: %s", n)
+		}
+	}
 	tick := &rowTicker{}
 	// rowCap bounds materialized rows: when a MaxRows policy applies, emit
 	// at most maxRows+1 so exceeding the cap is detected (and aborted)
@@ -688,6 +693,9 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 	}
 	column := strings.ToLower(strings.TrimSpace(expression[open+1 : close]))
 	isCountStar := hasPrefixFold(trimmed, "COUNT(") && column == "*"
+	if column == "*" && !isCountStar {
+		return Result{}, errors.New("invalid aggregate: only COUNT(*) supports *")
+	}
 	// Column validation is unconditional so aggregates on a missing column
 	// error identically on small tables and the fast path.
 	if column != "*" && !hasColumn(t.Columns, column) {

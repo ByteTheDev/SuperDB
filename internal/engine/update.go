@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -31,10 +32,16 @@ func (d *Database) update(ctx context.Context, s string) (Result, error) {
 	}
 	col := strings.ToLower(strings.TrimSpace(ap[0]))
 	var typ Type
+	found := false
 	for _, c := range t.Columns {
 		if c.Name == col {
 			typ = c.Type
+			found = true
+			break
 		}
+	}
+	if !found {
+		return Result{}, fmt.Errorf("column not found: %s", col)
 	}
 	v, e := parseVal(ap[1], typ)
 	if e != nil {

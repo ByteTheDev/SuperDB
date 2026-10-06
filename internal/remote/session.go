@@ -90,7 +90,7 @@ func (s *session) execOne(ctx context.Context, raw string) (engine.Result, strin
 		}
 		clone, err := s.db.Clone()
 		if err != nil {
-			return engine.Result{}, "", &execError{Code: "INTERNAL_ERROR", Msg: "begin failed"}
+			return engine.Result{}, "", &execError{Code: "INTERNAL_ERROR", Msg: "begin failed: " + err.Error()}
 		}
 		s.tx = clone
 		s.txSQL = nil
@@ -117,7 +117,7 @@ func (s *session) execOne(ctx context.Context, raw string) (engine.Result, strin
 		if err := s.db.CommitFrom(s.tx, func(img *engine.Database) error {
 			return persistStatements(s.mode, s.dataDir, writes, img, s.walWriter)
 		}); err != nil {
-			return engine.Result{}, "", &execError{Code: "QUERY_ERROR", Msg: "commit failed"}
+			return engine.Result{}, "", &execError{Code: "QUERY_ERROR", Msg: "commit failed: " + err.Error()}
 		}
 		s.tx = nil
 		s.txSQL = nil
@@ -141,7 +141,7 @@ func (s *session) execOne(ctx context.Context, raw string) (engine.Result, strin
 		}
 	} else if isWriteSQL(raw) {
 		if err := persistStatements(s.mode, s.dataDir, []string{raw}, s.db, s.walWriter); err != nil {
-			return engine.Result{}, "", &execError{Code: "INTERNAL_ERROR", Msg: "persist failed"}
+			return engine.Result{}, "", &execError{Code: "INTERNAL_ERROR", Msg: "persist failed: " + err.Error()}
 		}
 	}
 	return res, "", nil
@@ -242,7 +242,7 @@ func isWriteSQL(raw string) bool {
 }
 
 func writeStatements(sqls []string) []string {
-	out := sqls[:0]
+	out := make([]string, 0, len(sqls))
 	for _, sql := range sqls {
 		if isWriteSQL(sql) {
 			out = append(out, sql)

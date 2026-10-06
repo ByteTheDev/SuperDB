@@ -339,7 +339,7 @@ func isWriteSQL(raw string) bool {
 // writeStatements drops read-only statements from a recorded batch so the
 // WAL only carries statements that can mutate state.
 func writeStatements(sqls []string) []string {
-	out := sqls[:0]
+	out := make([]string, 0, len(sqls))
 	for _, sql := range sqls {
 		if isWriteSQL(sql) {
 			out = append(out, sql)

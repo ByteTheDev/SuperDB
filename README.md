@@ -143,7 +143,7 @@ go run ./cmd/superdb compact --data-dir ./SUPERDB
 
 The common flags are `--data-dir` (also available as `--data`), `--addr`, and `--mode`. `status` shows the configured server settings and storage file sizes. `backup` copies the compressed `.spdb` files, `restore` copies them back, and `compact` rewrites a fresh compressed snapshot.
 
-WAL and snapshot files use a versioned, zlib-compressed SUPERDB storage format. Older line-based WAL files, plain JSON snapshots, and the previous filenames remain readable. The TCP API still sends and receives normal JSON.
+WAL and snapshot files use a versioned, zlib-compressed SUPERDB storage format. Active snapshot and WAL frames carry a CRC-32C checksum of their stored payload, so corruption is detected on every load, replay, and backup verification. Older line-based WAL files, plain JSON snapshots, the previous filenames, and older un-checksummed frames remain readable. The TCP API still sends and receives normal JSON.
 
 ## Cluster mode (foundation)
 

@@ -473,6 +473,9 @@ func runCompact(args []string) {
 	if err := server.LoadSnapshot(*data, db); err != nil {
 		log.Fatal(err)
 	}
+	if err := server.ReplayWAL(*data, db); err != nil {
+		log.Fatal(err)
+	}
 	if err := storage.WriteSnapshot(storage.SnapshotPath(*data), db); err != nil {
 		log.Fatal(err)
 	}

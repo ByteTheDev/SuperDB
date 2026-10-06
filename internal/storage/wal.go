@@ -17,6 +17,14 @@ func AppendWAL(path, sql string) error {
 
 // AppendWALBatch appends multiple records and performs one durable sync.
 func AppendWALBatch(path string, sqls []string) error {
+	if len(sqls) == 0 {
+		return nil
+	}
+	for _, sql := range sqls {
+		if len(sql) > maxPayloadSize {
+			return errors.New("payload exceeds SUPERDB size limit")
+		}
+	}
 	writer, err := OpenWALWriter(path)
 	if err != nil {
 		return err
@@ -56,7 +64,7 @@ func (w *WALWriter) Append(sqls []string) error {
 		if len(sql) > maxPayloadSize {
 			return errors.New("payload exceeds SUPERDB size limit")
 		}
-		total += headerSize + len(sql)
+		total += checksumHeaderSize + len(sql)
 	}
 	encoded := walEncodePool.Get().([]byte)[:0]
 	if cap(encoded) < total {
@@ -69,17 +77,27 @@ func (w *WALWriter) Append(sqls []string) error {
 	}()
 	for _, sql := range sqls {
 		encoded = append(encoded, magic...)
-		encoded = append(encoded, walKind, walVersion, 0, 0)
+		encoded = append(encoded, walKind, checksumVersion, 0, 0)
 		var lengths [8]byte
 		binary.BigEndian.PutUint32(lengths[0:4], uint32(len(sql)))
 		binary.BigEndian.PutUint32(lengths[4:8], uint32(len(sql)))
 		encoded = append(encoded, lengths[:]...)
+		crcAt := len(encoded)
+		encoded = append(encoded, 0, 0, 0, 0)
+		payloadStart := len(encoded)
 		encoded = append(encoded, sql...)
+		// Checksum the stored payload in place to avoid a copy per record.
+		binary.BigEndian.PutUint32(encoded[crcAt:crcAt+checksumSize], checksumStored(encoded[payloadStart:]))
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if _, err := w.file.Write(encoded); err != nil {
+	if w.file == nil {
+		return errors.New("WAL writer closed")
+	}
+	if n, err := w.file.Write(encoded); err != nil {
 		return err
+	} else if n != len(encoded) {
+		return errors.New("short WAL write")
 	}
 	return w.file.Sync()
 }

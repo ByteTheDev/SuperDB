@@ -249,7 +249,7 @@ SUPERDB/
   wal.spdb
 ```
 
-The custom format begins with `SUPERDB1`. The frame contains magic, record kind (`S` snapshot or `W` WAL), version, uncompressed length, stored length, and payload. Snapshot/version-1 frames use zlib. WAL version 2 supports batched WAL payloads. `internal/storage/format.go` is authoritative.
+The custom format begins with `SUPERDB1`. The frame contains magic, record kind (`S` snapshot or `W` WAL), version, uncompressed length, stored length, and payload. Snapshot/version-1 frames use zlib. WAL version 2 supports batched WAL payloads. Version 3 frames (the current write format for both kinds) append a CRC-32C of the stored payload to the header, raising it from 20 to 24 bytes; decoding verifies the checksum before decompression. `internal/storage/format.go` is authoritative.
 
 Compatibility is required:
 
@@ -312,11 +312,9 @@ Not yet implemented: per-user authorization, sharded storage, auto-splitting, cr
 Recommended priorities:
 
 1. Local-server TLS and stronger authorization.
-2. Checksums for active snapshot/WAL frames beyond backup manifests.
-3. Prepared statements and streaming result sets.
-4. Proper interactive SQL shell.
-5. Live cluster-aware readiness, metrics for engine/storage/Raft, and health endpoint binding controls.
-6. Reproducible SuperDB/SQLite/PostgreSQL/CockroachDB benchmark harness.
+2. Prepared statements and streaming result sets.
+3. Live cluster-aware readiness, metrics for engine/storage/Raft, and health endpoint binding controls.
+4. Reproducible SuperDB/SQLite/PostgreSQL/CockroachDB benchmark harness.
 
 ## Handoff format
 
