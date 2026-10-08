@@ -99,7 +99,7 @@ The default listener is:
 127.0.0.1:7654
 ```
 
-Keep the default loopback address for local development. Do not expose a development server to the public internet; the current server does not authenticate clients or encrypt traffic.
+Keep the default loopback address for local development. Do not expose a development server to the public internet without hardening it: `--auth-key` requires an access key on every request, and `--tls-cert`/`--tls-key` encrypt client connections with TLS 1.2+ (clients connect with `superdb-cli --tls --tls-ca cert.pem` or `--tls-skip-verify`).
 
 Production profile:
 
@@ -245,6 +245,12 @@ Single query request:
 
 ```json
 {"sql":"SELECT * FROM users"}
+```
+
+Parameterized request — the server binds `?` placeholders into literals via `engine.BindParams`; valid only with `sql`, not `sqls`:
+
+```json
+{"sql":"INSERT INTO users VALUES (?, ?)","params":[1,"Ada"]}
 ```
 
 Batch request:
@@ -452,14 +458,13 @@ Also:
 
 SuperDB currently lacks:
 
-- Authentication.
-- Authorization and roles.
-- TLS.
-- Replication and clustering.
-- Prometheus metrics.
+- Authorization and roles (an all-or-nothing `--auth-key` and hosted
+  username/password auth exist).
+- Mutual TLS / certificate-based client authentication (server-side TLS
+  exists on `server --tls-cert/--tls-key` and `serve`).
+- Prometheus metrics exposition (hosted `/metrics` counters exist).
 - Full SQL grammar.
 - Formal schema migration tooling.
-- A proper interactive SQL shell.
 - A reproducible CockroachDB benchmark adapter.
 
 These limitations should be stated clearly in documentation and release notes.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"superdb/internal/server"
 )
 
 // conn is one TCP connection to a SuperDB server. A single connection is
@@ -21,12 +24,20 @@ type conn struct {
 	w *bufio.Writer
 }
 
-func dial(addr string) (*conn, error) {
-	c, err := net.DialTimeout("tcp", addr, 10*time.Second)
+// dial connects to addr over plaintext (tlsCfg nil) or TLS. server.Dial
+// owns ServerName derivation from the address.
+func dial(addr string, tlsCfg *tls.Config) (*conn, error) {
+	c, err := server.Dial(addr, 10*time.Second, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
-	if tcp, ok := c.(*net.TCPConn); ok {
+	raw := c
+	if nc, ok := c.(interface{ NetConn() net.Conn }); ok {
+		if u := nc.NetConn(); u != nil {
+			raw = u
+		}
+	}
+	if tcp, ok := raw.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
 		_ = tcp.SetReadBuffer(256 << 10)
 		_ = tcp.SetWriteBuffer(256 << 10)
@@ -70,11 +81,15 @@ func (c *conn) recv() ([]byte, error) {
 }
 
 // query runs one statement as a {"sql": ...} request and returns the raw
-// response payload.
-func (c *conn) query(authKey, sql string) ([]byte, error) {
-	msg := map[string]string{"sql": sql}
+// response payload. Non-empty params are sent alongside so the server
+// binds ? placeholders into literals.
+func (c *conn) query(authKey, sql string, params []any) ([]byte, error) {
+	msg := map[string]any{"sql": sql}
 	if authKey != "" {
 		msg["auth"] = authKey
+	}
+	if len(params) > 0 {
+		msg["params"] = params
 	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
@@ -149,12 +164,17 @@ func collectQueries(args []string, file string) ([]string, error) {
 }
 
 // runBatch executes statements non-interactively over one connection and
-// prints one response per statement.
-func runBatch(addr, authKey string, queries []string, format string, timing bool) error {
+// prints one response per statement. params binds ? placeholders on a
+// single-statement run; multi-statement runs reject it up front because
+// the protocol has no per-statement params shape.
+func runBatch(addr, authKey string, queries []string, params []any, format string, timing bool, tlsCfg *tls.Config) error {
 	if len(queries) == 0 {
 		return nil
 	}
-	c, err := dial(addr)
+	if len(params) > 0 && len(queries) != 1 {
+		return errors.New("--params requires a single query")
+	}
+	c, err := dial(addr, tlsCfg)
 	if err != nil {
 		return err
 	}
@@ -163,7 +183,7 @@ func runBatch(addr, authKey string, queries []string, format string, timing bool
 	_ = c.c.SetDeadline(time.Now().Add(2 * time.Minute))
 	if len(queries) == 1 {
 		started := time.Now()
-		resp, err := c.query(authKey, queries[0])
+		resp, err := c.query(authKey, queries[0], params)
 		if err != nil {
 			return err
 		}
@@ -203,8 +223,8 @@ func stdinIsTerminal() bool {
 }
 
 // probeServer pings the server and returns an error describing failure.
-func probeServer(addr, authKey string) error {
-	c, err := dial(addr)
+func probeServer(addr, authKey string, tlsCfg *tls.Config) error {
+	c, err := dial(addr, tlsCfg)
 	if err != nil {
 		return err
 	}

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+
+	"superdb/internal/server"
 )
 
 var version = "dev"
@@ -19,8 +23,28 @@ func main() {
 	timing := flag.Bool("timing", false, "print per-query elapsed time")
 	file := flag.String("file", "", "execute SQL statements from a file, then exit")
 	flag.StringVar(file, "f", "", "alias for --file")
+	paramsFlag := flag.String("params", "", "JSON array of values bound to ? placeholders (single query only)")
+	tlsOn := flag.Bool("tls", false, "connect over TLS")
+	tlsCA := flag.String("tls-ca", "", "PEM file of CA/certificates to trust for TLS (implies --tls)")
+	tlsSkip := flag.Bool("tls-skip-verify", false, "skip TLS certificate verification, insecure (implies --tls)")
 	ping := flag.Bool("ping", false, "probe the server for reachability, then exit")
 	flag.Parse()
+	var tlsCfg *tls.Config
+	if *tlsOn || *tlsCA != "" || *tlsSkip {
+		var err error
+		tlsCfg, err = server.ClientTLSConfig(*tlsCA, *tlsSkip)
+		if err != nil {
+			fmt.Fprintf(stderr, "superdb-cli: %v\n", err)
+			os.Exit(2)
+		}
+	}
+	var params []any
+	if *paramsFlag != "" {
+		if err := json.Unmarshal([]byte(*paramsFlag), &params); err != nil {
+			fmt.Fprintf(stderr, "superdb-cli: invalid --params %q: %v\n", *paramsFlag, err)
+			os.Exit(2)
+		}
+	}
 	if *authKey == "" {
 		*authKey = os.Getenv("SUPERDB_AUTH_KEY")
 	}
@@ -29,7 +53,7 @@ func main() {
 		os.Exit(2)
 	}
 	if *ping {
-		if err := probeServer(*addr, *authKey); err != nil {
+		if err := probeServer(*addr, *authKey, tlsCfg); err != nil {
 			fmt.Fprintf(stderr, "superdb-cli: %s not reachable: %v\n", *addr, err)
 			os.Exit(1)
 		}
@@ -45,7 +69,7 @@ func main() {
 		outFormat = "json"
 	}
 	if interactive {
-		c, err := dial(*addr)
+		c, err := dial(*addr, tlsCfg)
 		if err != nil {
 			fmt.Fprintf(stderr, "superdb-cli: cannot connect to %s: %v\n", *addr, err)
 			os.Exit(1)
@@ -61,7 +85,7 @@ func main() {
 		fmt.Fprintf(stderr, "superdb-cli: %v\n", err)
 		os.Exit(1)
 	}
-	if err := runBatch(*addr, *authKey, queries, outFormat, *timing); err != nil {
+	if err := runBatch(*addr, *authKey, queries, params, outFormat, *timing, tlsCfg); err != nil {
 		fmt.Fprintf(stderr, "superdb-cli: %v\n", err)
 		os.Exit(1)
 	}

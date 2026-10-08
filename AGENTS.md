@@ -4,7 +4,7 @@ This is the single source of truth for AI agents working on SuperDB. Read it bef
 
 ## Project
 
-SuperDB is a lightweight Go SQL database with an in-memory engine, TCP server/client, compressed SUPERDB storage, snapshots, WAL durability, backups, recovery, and benchmarks. It is not currently PostgreSQL-compatible, distributed, authenticated, TLS-secured, or enterprise-ready.
+SuperDB is a lightweight Go SQL database with an in-memory engine, TCP server/client, compressed SUPERDB storage, snapshots, WAL durability, backups, recovery, and benchmarks. Access keys, TLS, and Raft clustering are opt-in per deployment mode; it is not PostgreSQL-compatible or enterprise-ready.
 
 Module: `superdb`. Main programs:
 
@@ -42,6 +42,7 @@ internal/engine/snapshot.go      JSON snapshot serialization
 internal/server/server.go        TCP lifecycle and SQL sessions
 internal/server/protocol.go      Length-prefixed JSON protocol
 internal/server/limits.go        Limits config + Limiter admission control
+internal/server/tls.go           Server/client TLS configs + TLS-aware dial
 internal/server/persistence.go   Snapshot/WAL loading and persistence
 internal/server/backups.go       Timestamped backups and recovery
 internal/server/cluster.go       Bridge: start cluster node around local engine
@@ -123,7 +124,7 @@ go run ./cmd/superdb --production --data-dir ./SUPERDB
 go run ./cmd/superdb server --profile production --data-dir ./SUPERDB
 ```
 
-Production enables WAL when mode is memory, larger TCP buffers, keepalive, and the optimized WAL writer. It does not enable authentication or TLS; do not expose it to an untrusted network.
+Production enables WAL when mode is memory, larger TCP buffers, keepalive, and the optimized WAL writer. It does not enable authentication or TLS (explicit `--auth-key` and `--tls-cert`/`--tls-key` flags do); do not expose it to an untrusted network without them.
 
 Administration commands:
 
@@ -144,7 +145,7 @@ Shared flags:
 - `--addr HOST:PORT`: TCP address, default `127.0.0.1:7654`.
 - `--mode memory|wal|snapshot`.
 
-Server-only flags include `--profile standard|production`, `--production`, `--backup-dir DIR`, `--backup-interval DURATION`, `--cluster-addr` (alias `--listen`), `--advertise`, `--join`, and `--region`. Cluster mode is off unless `--cluster-addr` is set; see `docs/cluster.md`. Cluster mode runs hashicorp/raft (new `go.mod` deps); session transactions are rejected there in favor of atomic batches.
+Server-only flags include `--profile standard|production`, `--production`, `--backup-dir DIR`, `--backup-interval DURATION`, `--cluster-addr` (alias `--listen`), `--advertise`, `--join`, `--region`, `--tls-cert FILE`, and `--tls-key FILE` (or `SUPERDB_TLS_CERT`/`SUPERDB_TLS_KEY`). TLS wraps the client listener (TLS 1.2+); cert and key must be set together. Clients use `superdb-cli --tls` plus `--tls-ca FILE` (trust a PEM, e.g. a self-signed server cert) or `--tls-skip-verify`; `status` accepts the same flags for its live probe. Cluster mode is off unless `--cluster-addr` is set; see `docs/cluster.md`. Cluster mode runs hashicorp/raft (new `go.mod` deps); session transactions are rejected there in favor of atomic batches.
 
 Safety-limit flags on `server` (all default to disabled): `--query-timeout`, `--max-result-rows`, `--max-result-bytes`, `--max-inflight-queries`, `--query-queue-timeout`, `--max-connections`, `--max-batch-statements`, `--max-tx-statements`, `--max-tx-database-rows`, `--max-request-bytes`. `serve` exposes the same set minus connection/batch/request caps (already covered by `MaxConnections` and frame size) plus `SUPERDB_*` env vars; see `docs/hosted.md`.
 
@@ -228,8 +229,11 @@ Requests:
 
 ```json
 {"sql":"SELECT * FROM users"}
+{"sql":"INSERT INTO users VALUES (?, ?)","params":[1,"Ada"]}
 {"sqls":["INSERT INTO users VALUES (1, 'Ada')","SELECT * FROM users"]}
 ```
+
+`params` supplies values for `?` placeholders, bound into escaped literals server-side by `engine.BindParams` (the same path the hosted SDB1 protocol uses) before execution — transactions and the WAL record the bound statement. It is valid only on single `sql` requests; `sqls` batches reject it. The fast request parser declines `params` payloads to `encoding/json`.
 
 Responses use the same length prefix and JSON. Successful responses are engine `Result` values; errors contain an `error` string. Requests are limited to 16 MiB (`Limits.MaxRequestBytes` adjusts it). `Limits.MaxResultBytes` replaces oversized responses with an error.
 
@@ -307,11 +311,11 @@ After editing, run formatting, tests, vet, build, race tests when relevant, benc
 
 ## Known limitations and roadmap
 
-Not yet implemented: per-user authorization, sharded storage, auto-splitting, cross-shard transactions, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Raft quorum writes/failover, range split/move/assign, atomic batches, and region placement exist (all voters hold all data); see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check. Access keys (local `--auth-key`), username/password auth and TLS (`serve`), and connection/query safety limits exist; see "Safety limits".
+Not yet implemented: per-user authorization, sharded storage, auto-splitting, cross-shard transactions, full SQL grammar, formal migrations, and a valid CockroachDB comparison benchmark. Raft quorum writes/failover, range split/move/assign, atomic batches, and region placement exist (all voters hold all data); see `docs/cluster.md`. Local status is file/configuration status, not a live remote health check. Access keys (local `--auth-key`), username/password auth (`serve`), TLS (`server --tls-cert/--tls-key` and `serve`), and connection/query safety limits exist; see "Safety limits".
 
 Recommended priorities:
 
-1. Local-server TLS and stronger authorization.
+1. Stronger authorization.
 2. Prepared statements and streaming result sets.
 3. Live cluster-aware readiness, metrics for engine/storage/Raft, and health endpoint binding controls.
 4. Reproducible SuperDB/SQLite/PostgreSQL/CockroachDB benchmark harness.

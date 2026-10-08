@@ -68,7 +68,7 @@ func runShell(c *conn, addr, authKey, format string, timing bool) error {
 		pending.WriteString(rest)
 		for _, sql := range stmts {
 			started := time.Now()
-			resp, err := c.query(authKey, sql)
+			resp, err := c.query(authKey, sql, nil)
 			if err != nil {
 				fmt.Fprintf(stderr, "connection lost: %v\n", err)
 				return err

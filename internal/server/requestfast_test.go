@@ -97,6 +97,31 @@ func TestParseRequestFastDeclinesMalformed(t *testing.T) {
 	}
 }
 
+func TestParseRequestFastDeclinesParams(t *testing.T) {
+	// Any "params" key — even empty or null — must take the encoding/json
+	// fallback: the fast parser cannot decode arbitrary []any values and
+	// silently dropping them would run unbound SQL.
+	for _, payload := range []string{
+		`{"sql":"INSERT INTO t VALUES (?)","params":[1]}`,
+		`{"params":[1,2,3],"sql":"x"}`,
+		`{"sql":"x","params":[]}`,
+		`{"sql":"x","params":null}`,
+		`{"sqls":["a"],"params":[1]}`,
+	} {
+		if _, ok := parseRequestFast([]byte(payload)); ok {
+			t.Fatalf("fast path must decline params payloads: %s", payload)
+		}
+	}
+	// The fallback decodes params faithfully.
+	q, err := stdRequest(t, `{"sql":"x","params":[1,"a",null,true,2.5]}`)
+	if err != nil || len(q.Params) != 5 {
+		t.Fatalf("params decode: %+v err=%v", q, err)
+	}
+	if q.Params[0] != float64(1) || q.Params[1] != "a" || q.Params[2] != nil || q.Params[3] != true || q.Params[4] != 2.5 {
+		t.Fatalf("params values mismatch: %+v", q.Params)
+	}
+}
+
 func TestParseRequestFastStringEscapes(t *testing.T) {
 	// Every escape shape must decode exactly like encoding/json.
 	values := []string{

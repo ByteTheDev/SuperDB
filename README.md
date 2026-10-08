@@ -58,6 +58,7 @@ go run ./cmd/superdb server --mode memory
 go run ./cmd/superdb-cli --addr 127.0.0.1:7654 "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOL)"
 go run ./cmd/superdb-cli --addr 127.0.0.1:7654 "INSERT INTO users VALUES (1, 'Ada', true)"
 go run ./cmd/superdb-cli --addr 127.0.0.1:7654 "SELECT * FROM users WHERE id = 1"
+go run ./cmd/superdb-cli --addr 127.0.0.1:7654 --params '[2, "Grace"]' "INSERT INTO users VALUES (?, ?)"
 ```
 
 Modes are `memory`, `wal`, and `snapshot`. By default, WAL and snapshot data are stored in a `SUPERDB` folder in the project directory:
@@ -114,6 +115,20 @@ To require an access key on every client request, start the server with
 client with `--auth-key` (or `SUPERDB_AUTH_KEY`). Without the correct key the
 server returns an `unauthorized` error and runs no SQL. When no key is
 configured, authentication is disabled for backward compatibility.
+
+Encrypt client traffic with TLS 1.2+ by giving the server a certificate
+and key (or the `SUPERDB_TLS_CERT`/`SUPERDB_TLS_KEY` environment
+variables — both are required together):
+
+```bash
+go run ./cmd/superdb server --tls-cert cert.pem --tls-key key.pem
+go run ./cmd/superdb-cli --addr 127.0.0.1:7654 --tls --tls-ca cert.pem "SELECT * FROM users"
+```
+
+`--tls-ca` trusts the PEM file (use it for a self-signed server
+certificate); `--tls-skip-verify` disables verification for testing. The
+`status` live probe accepts the same `--tls`/`--tls-ca`/`--tls-skip-verify`
+flags.
 
 Connection and query safety limits are available on both servers:
 

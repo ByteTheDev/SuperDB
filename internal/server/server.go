@@ -46,7 +46,15 @@ type ClusterExec interface {
 
 func HandleWithOptions(c net.Conn, db *engine.Database, mode, data string, options HandleOptions) {
 	defer c.Close()
-	if tcp, ok := c.(*net.TCPConn); ok {
+	// TLS connections wrap the socket; apply TCP tuning to the
+	// underlying transport, not the wrapper.
+	raw := c
+	if nc, ok := c.(interface{ NetConn() net.Conn }); ok {
+		if u := nc.NetConn(); u != nil {
+			raw = u
+		}
+	}
+	if tcp, ok := raw.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
 		if options.Production {
 			_ = tcp.SetKeepAlive(true)
@@ -114,6 +122,21 @@ func (s *session) active() *engine.Database {
 }
 
 func executeRequest(q request, s *session, mode, data string) any {
+	// Bind ? placeholders into literals up front so execution, session
+	// transaction recording, and WAL persistence all see the bound
+	// statement — replaying "INSERT ... VALUES (?)" would be a syntax
+	// error. Mirrors the hosted server's per-query bind. params pairs
+	// with "sql" only; batches have no per-statement params shape.
+	if len(q.SQLs) > 0 && len(q.Params) > 0 {
+		return map[string]string{"error": "params are only supported on single sql requests"}
+	}
+	if len(q.SQLs) == 0 {
+		bound, err := engine.BindParams(q.SQL, q.Params)
+		if err != nil {
+			return map[string]string{"error": err.Error()}
+		}
+		q.SQL = bound
+	}
 	// Admission control: one inflight slot per request (a batch counts
 	// once). Waiting longer than AcquireTimeout fails fast with ErrBusy
 	// so an overloaded node sheds load instead of queueing unboundedly.

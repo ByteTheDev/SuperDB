@@ -1,25 +1,27 @@
 package server
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"time"
 )
 
 // Ping checks whether a SuperDB TCP server is reachable and answering the
 // length-prefixed JSON protocol. It sends {"ping":true} and expects a
 // status-ok response; the auth key is optional because ping is answered
-// before authentication. A non-SuperDB listener, a refused connection, or
-// a timeout all return an error so callers can report "not reachable".
-func Ping(addr, authKey string, timeout time.Duration) error {
+// before authentication. tlsCfg is nil for plaintext or a client TLS
+// config for TLS listeners. A non-SuperDB listener, a refused connection,
+// a failed handshake, or a timeout all return an error so callers can
+// report "not reachable".
+func Ping(addr, authKey string, timeout time.Duration, tlsCfg *tls.Config) error {
 	if timeout <= 0 {
 		timeout = 800 * time.Millisecond
 	}
-	c, err := net.DialTimeout("tcp", addr, timeout)
+	c, err := Dial(addr, timeout, tlsCfg)
 	if err != nil {
 		return err
 	}

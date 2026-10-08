@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -140,6 +141,8 @@ func runServer(args []string, globalProduction bool) {
 	join := fs.String("join", "", "comma-separated seed cluster address(es) to join")
 	region := fs.String("region", "", "region label for placement (optional)")
 	authKey := fs.String("auth-key", "", "require this access key on every client request (or SUPERDB_AUTH_KEY)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate file for encrypted client connections (or SUPERDB_TLS_CERT)")
+	tlsKey := fs.String("tls-key", "", "TLS private key file (or SUPERDB_TLS_KEY)")
 	queryTimeout := fs.Duration("query-timeout", 0, "per-statement timeout (0 disables)")
 	maxResultRows := fs.Int("max-result-rows", 0, "max rows a SELECT may return (0 disables)")
 	maxResultBytes := fs.Int("max-result-bytes", 0, "max encoded response bytes per request (0 disables)")
@@ -153,6 +156,12 @@ func runServer(args []string, globalProduction bool) {
 	fs.Parse(args)
 	if *authKey == "" {
 		*authKey = os.Getenv("SUPERDB_AUTH_KEY")
+	}
+	if *tlsCert == "" {
+		*tlsCert = os.Getenv("SUPERDB_TLS_CERT")
+	}
+	if *tlsKey == "" {
+		*tlsKey = os.Getenv("SUPERDB_TLS_KEY")
 	}
 	if *profile != "standard" && *profile != "production" {
 		log.Fatal("profile must be standard or production")
@@ -217,10 +226,18 @@ func runServer(args []string, globalProduction bool) {
 	if *backupDir != "" {
 		go runAutomaticBackups(*backupDir, *backupInterval, db)
 	}
+	tlsCfg, err := server.ServerTLSConfig(*tlsCert, *tlsKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tlsNote := "disabled"
+	if tlsCfg != nil {
+		tlsNote = "enabled"
+	}
 	if *authKey != "" {
-		log.Printf("SuperDB listening on %s mode=%s data=%s auth=enabled", *addr, *mode, *data)
+		log.Printf("SuperDB listening on %s mode=%s data=%s auth=enabled tls=%s", *addr, *mode, *data, tlsNote)
 	} else {
-		log.Printf("SuperDB listening on %s mode=%s data=%s auth=disabled", *addr, *mode, *data)
+		log.Printf("SuperDB listening on %s mode=%s data=%s auth=disabled tls=%s", *addr, *mode, *data, tlsNote)
 	}
 	limits := server.Limits{
 		QueryTimeout: *queryTimeout, MaxResultRows: *maxResultRows, MaxResultBytes: *maxResultBytes,
@@ -232,6 +249,9 @@ func runServer(args []string, globalProduction bool) {
 	ln, e := net.Listen("tcp", *addr)
 	if e != nil {
 		log.Fatal(e)
+	}
+	if tlsCfg != nil {
+		ln = tls.NewListener(ln, tlsCfg)
 	}
 	defer ln.Close()
 	// Graceful shutdown: SIGINT/SIGTERM closes the listener so the accept
@@ -357,14 +377,25 @@ func runAutomaticBackups(dir string, interval time.Duration, db *engine.Database
 func runStatus(args []string) {
 	fs, data, addr, mode := flags("status", args)
 	authKey := fs.String("auth-key", "", "access key for the live probe (or SUPERDB_AUTH_KEY)")
+	tlsOn := fs.Bool("tls", false, "probe over TLS")
+	tlsCA := fs.String("tls-ca", "", "PEM file of CA/certificates to trust for TLS (implies --tls)")
+	tlsSkip := fs.Bool("tls-skip-verify", false, "skip TLS certificate verification, insecure (implies --tls)")
 	fs.Parse(args)
 	if *authKey == "" {
 		*authKey = os.Getenv("SUPERDB_AUTH_KEY")
 	}
+	var tlsCfg *tls.Config
+	if *tlsOn || *tlsCA != "" || *tlsSkip {
+		var err error
+		tlsCfg, err = server.ClientTLSConfig(*tlsCA, *tlsSkip)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	fmt.Printf("SuperDB status\n  data: %s\n  address: %s\n  mode: %s\n", *data, *addr, *mode)
 	// Live probe: the server answers {"ping":true} without auth, so this
 	// works against key-protected instances too.
-	if err := server.Ping(*addr, *authKey, 800*time.Millisecond); err != nil {
+	if err := server.Ping(*addr, *authKey, 800*time.Millisecond, tlsCfg); err != nil {
 		fmt.Printf("  server: not reachable (%v)\n", err)
 	} else {
 		fmt.Printf("  server: reachable at %s\n", *addr)

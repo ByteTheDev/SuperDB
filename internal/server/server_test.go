@@ -5,10 +5,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"superdb/internal/engine"
@@ -318,4 +320,141 @@ func TestBackupChecksumVerificationAndLegacyBackup(t *testing.T) {
 	if err != nil || legacy.ChecksumVerified {
 		t.Fatalf("legacy backup should decode without manifest: result=%+v err=%v", legacy, err)
 	}
+}
+
+func mustNoErr(t *testing.T, out any) {
+	t.Helper()
+	if m, ok := out.(map[string]string); ok && m["error"] != "" {
+		t.Fatalf("request failed: %s", m["error"])
+	}
+}
+
+func TestHandleParamsBindEndToEnd(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	db := engine.New()
+	done := make(chan struct{})
+	go func() {
+		Handle(serverConn, db, "memory", t.TempDir())
+		close(done)
+	}()
+	roundTrip := func(req any) map[string]any {
+		payload, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+		if _, err := clientConn.Write(header[:]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := clientConn.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readFull(clientConn, header[:]); err != nil {
+			t.Fatal(err)
+		}
+		response := make([]byte, binary.BigEndian.Uint32(header[:]))
+		if _, err := readFull(clientConn, response); err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(response, &out); err != nil {
+			t.Fatalf("response is not JSON: %v", err)
+		}
+		return out
+	}
+	mustNoErr(t, roundTrip(map[string]any{"sql": "CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"}))
+	// Quotes inside params must be escaped by the binder, not by callers.
+	mustNoErr(t, roundTrip(map[string]any{
+		"sql":    "INSERT INTO users VALUES (?, ?)",
+		"params": []any{1, "O'Brien"},
+	}))
+	sel := roundTrip(map[string]any{
+		"sql":    "SELECT * FROM users WHERE name = ?",
+		"params": []any{"O'Brien"},
+	})
+	rows, ok := sel["rows"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("param select returned %v", sel)
+	}
+	if row := rows[0].([]any); row[0] != float64(1) || row[1] != "O'Brien" {
+		t.Fatalf("bound row mismatch: %v", row)
+	}
+	missing := roundTrip(map[string]any{"sql": "SELECT * FROM users WHERE id = ?"})
+	if !strings.Contains(fmt.Sprint(missing["error"]), "missing params") {
+		t.Fatalf("placeholder without params must fail: %v", missing)
+	}
+	tooMany := roundTrip(map[string]any{
+		"sql":    "SELECT * FROM users WHERE id = ?",
+		"params": []any{1, 2},
+	})
+	if !strings.Contains(fmt.Sprint(tooMany["error"]), "too many params") {
+		t.Fatalf("extra params must fail: %v", tooMany)
+	}
+	batch := roundTrip(map[string]any{"sqls": []string{"SELECT 1"}, "params": []any{1}})
+	if !strings.Contains(fmt.Sprint(batch["error"]), "params are only supported") {
+		t.Fatalf("params with sqls must be rejected: %v", batch)
+	}
+	// A '?' inside a quoted literal is text, not a placeholder.
+	literal := roundTrip(map[string]any{"sql": "SELECT * FROM users WHERE name = '?'"})
+	if literal["error"] != nil {
+		t.Fatalf("quoted placeholder must not bind: %v", literal)
+	}
+	clientConn.Close()
+	<-done
+	res, err := db.Exec("SELECT name FROM users WHERE id = 1")
+	if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != "O'Brien" {
+		t.Fatalf("bound insert missing: %+v %v", res, err)
+	}
+}
+
+func TestParamsPersistBoundSQLToWAL(t *testing.T) {
+	dir := t.TempDir()
+	db := engine.New()
+	s := &session{db: db}
+	mustNoErr(t, executeRequest(request{SQL: "CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"}, s, "wal", dir))
+	mustNoErr(t, executeRequest(request{SQL: "INSERT INTO users VALUES (?, ?)", Params: []any{1, "O'Brien"}}, s, "wal", dir))
+	replayed := engine.New()
+	if err := ReplayWAL(dir, replayed); err != nil {
+		t.Fatalf("WAL must contain bound literals, not placeholders: %v", err)
+	}
+	res, err := replayed.Exec("SELECT name FROM users WHERE id = 1")
+	if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != "O'Brien" {
+		t.Fatalf("replayed bound row mismatch: %+v %v", res, err)
+	}
+}
+
+func TestParamsInsideTransactionPersistBound(t *testing.T) {
+	dir := t.TempDir()
+	db := engine.New()
+	s := &session{db: db}
+	mustNoErr(t, executeRequest(request{SQL: "CREATE TABLE t (id INT PRIMARY KEY, v TEXT)"}, s, "wal", dir))
+	mustNoErr(t, executeRequest(request{SQL: "BEGIN"}, s, "wal", dir))
+	mustNoErr(t, executeRequest(request{SQL: "INSERT INTO t VALUES (?, ?)", Params: []any{1, "x'y"}}, s, "wal", dir))
+	mustNoErr(t, executeRequest(request{SQL: "COMMIT"}, s, "wal", dir))
+	replayed := engine.New()
+	if err := ReplayWAL(dir, replayed); err != nil {
+		t.Fatalf("committed params must replay as literals: %v", err)
+	}
+	res, err := replayed.Exec("SELECT v FROM t WHERE id = 1")
+	if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != "x'y" {
+		t.Fatalf("replayed tx row mismatch: %+v %v", res, err)
+	}
+}
+
+func TestParamsErrors(t *testing.T) {
+	db := engine.New()
+	s := &session{db: db}
+	wantErr := func(q request, substr string) {
+		out := executeRequest(q, s, "memory", t.TempDir())
+		m, ok := out.(map[string]string)
+		if !ok || !strings.Contains(m["error"], substr) {
+			t.Fatalf("want error containing %q, got %#v", substr, out)
+		}
+	}
+	wantErr(request{SQL: "SELECT * FROM t WHERE id = ?"}, "missing params")
+	wantErr(request{SQL: "SELECT * FROM t WHERE id = ?", Params: []any{1, 2}}, "too many params")
+	wantErr(request{SQL: "SELECT ? FROM t", Params: []any{}}, "missing params")
+	wantErr(request{SQLs: []string{"SELECT 1"}, Params: []any{1}}, "params are only supported")
+	wantErr(request{SQLs: []string{"SELECT 1"}, Atomic: true, Params: []any{1}}, "params are only supported")
 }

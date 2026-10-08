@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- TLS on the local `server` command: `--tls-cert`/`--tls-key` (or
+  `SUPERDB_TLS_CERT`/`SUPERDB_TLS_KEY`) wrap the client listener in TLS 1.2+.
+  `superdb-cli` and the `status` live probe connect with `--tls`, trusting a
+  PEM via `--tls-ca FILE` or opting out with `--tls-skip-verify`.
+- Parameterized queries on the local TCP protocol: a `"params": [...]` array
+  next to `"sql"` binds `?` placeholders into escaped literals server-side
+  (the same `engine.BindParams` path the hosted SDB1 server uses) before
+  execution, transaction recording, and WAL persistence. `params` is
+  rejected on `sqls` batches, and `superdb-cli --params '<json array>'`
+  supplies values for single-statement runs.
+
 ## v0.5.0 — Engine correctness and lifecycle fixes (2026-09-26)
 
 Fixed:

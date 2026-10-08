@@ -63,6 +63,11 @@ func parseRequestFast(payload []byte) (q request, ok bool) {
 				return request{}, false
 			}
 			out.AuthKey = s
+		case "params":
+			// params holds arbitrary JSON values ([]any); only
+			// encoding/json can decode it faithfully, so decline to
+			// the fallback rather than risk dropping bind values.
+			return request{}, false
 		case "atomic":
 			v, vOK := p.literal()
 			if !vOK {

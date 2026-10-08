@@ -27,6 +27,12 @@ var bufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 type request struct {
 	SQL  string   `json:"sql,omitempty"`
 	SQLs []string `json:"sqls,omitempty"`
+	// Params carries bind values for ? placeholders in SQL. They are
+	// bound into safely-escaped literals by engine.BindParams before
+	// execution — the same contract the hosted SDB1 server uses — so
+	// transactions and the WAL record the bound statement. Valid only
+	// on single-statement "sql" requests.
+	Params []any `json:"params,omitempty"`
 	// Auth carries the client-supplied access key. It is compared against
 	// the server's configured key (see HandleOptions.AuthKey); empty when
 	// the client did not supply one. "auth_key" is accepted as an alias
