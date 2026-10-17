@@ -1,7 +1,30 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 — SQL surface, integrity checksums, TLS, and backups (2026-10-17)
 
+Added:
+
+- SQL surface: `CREATE INDEX`, `ALTER TABLE ... ADD COLUMN` /
+  `DROP COLUMN`, `DROP TABLE [IF EXISTS]`, `DROP INDEX name ON t`,
+  `TRUNCATE`, and read-only introspection (`SHOW TABLES`, `SHOW COLUMNS`,
+  `SHOW INDEX`, `DESCRIBE`/`DESC`).
+- `GROUP BY` with `HAVING` over `COUNT`, `SUM`, `MIN`, `MAX`, and `AVG`;
+  select lists may mix grouping columns and aggregates.
+- `SELECT DISTINCT`, `OFFSET`, and `IN (...)`, `BETWEEN lo AND hi`, and
+  `LIKE` (`%`/`_`) predicates across SELECT/UPDATE/DELETE/aggregates.
+- `INSERT OR REPLACE` in-place upsert (existing keys keep their row
+  position) and `INSERT INTO t SELECT ...`.
+- Interactive `superdb-cli` SQL shell: one persistent connection,
+  multi-line input, and `.help`, `.exit`/`.quit`, `.format table|json`, and
+  `.timing` commands. New client flags: `--file`/`-f` script execution,
+  `--format`, `--timing`, and `--ping`.
+- Backups write a SHA-256 manifest alongside each timestamped snapshot, and
+  `superdb verify-backup [FILE|DIR]` validates a named snapshot or the newest
+  timestamped backup (including its manifest when present).
+- Hosted observability: `GET /ready` now reports storage/listener readiness
+  and returns HTTP 503 until both are up; `GET /metrics` exposes Prometheus
+  counters for connections, requests, admission rejections, bytes, average
+  request latency, and uptime.
 - TLS on the local `server` command: `--tls-cert`/`--tls-key` (or
   `SUPERDB_TLS_CERT`/`SUPERDB_TLS_KEY`) wrap the client listener in TLS 1.2+.
   `superdb-cli` and the `status` live probe connect with `--tls`, trusting a
@@ -12,6 +35,33 @@
   execution, transaction recording, and WAL persistence. `params` is
   rejected on `sqls` batches, and `superdb-cli --params '<json array>'`
   supplies values for single-statement runs.
+
+Storage:
+
+- Version 3 SUPERDB frames (the current write format for both snapshots and
+  WAL) append a CRC-32C of the stored payload to the header; decoding
+  verifies the checksum before decompression. Older un-checksummed frames,
+  legacy line-based WAL, plain JSON snapshots, and the previous filenames
+  remain readable.
+
+Fixed:
+
+- `compact` and `recover` fold the loaded snapshot+WAL state into a new
+  snapshot but now remove the WAL, so folded records cannot double-apply on
+  the next wal-mode start (previously a duplicate-PK fatal restart or silent
+  row duplication on synthetic `#N` keys).
+- Bare `column = literal` SELECT fast paths normalize the literal against the
+  column type before keying into the row/index buckets, so `id = 01`,
+  `v = 1.50`, and `k = TRUE` match exactly like the compiled scan.
+- The fast request parser declines case-variant field names (for example
+  `SQL`) to `encoding/json`, so they no longer error on the fast path while
+  succeeding on the fallback.
+- Unknown columns in SELECT projections, UPDATE, and aggregates are rejected,
+  star arguments to aggregates other than `COUNT(*)` are rejected, CREATE
+  TABLE validates its column definitions, and write statements no longer
+  mutate their input.
+- WAL writers return an error when appending after close; an empty WAL batch
+  creates no file; `EncodeFrame` rejects invalid kind/version combinations.
 
 ## v0.5.0 — Engine correctness and lifecycle fixes (2026-09-26)
 
