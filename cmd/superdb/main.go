@@ -501,13 +501,7 @@ func runCompact(args []string) {
 	fs, data, _, _ := flags("compact", args)
 	fs.Parse(args)
 	db := engine.New()
-	if err := server.LoadSnapshot(*data, db); err != nil {
-		log.Fatal(err)
-	}
-	if err := server.ReplayWAL(*data, db); err != nil {
-		log.Fatal(err)
-	}
-	if err := storage.WriteSnapshot(storage.SnapshotPath(*data), db); err != nil {
+	if err := server.Compact(*data, db); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Compacted snapshot at %s\n", storage.SnapshotPath(*data))

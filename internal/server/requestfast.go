@@ -1,6 +1,9 @@
 package server
 
-import "unicode/utf8"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Fast, allocation-light parser for the narrow request shapes clients send:
 // {"sql":"..."}, {"sqls":[...]}, and {"sqls":[...],"atomic":bool} with
@@ -97,6 +100,14 @@ func parseRequestFast(payload []byte) (q request, ok bool) {
 				return request{}, false
 			}
 		default:
+			// encoding/json binds struct fields case-insensitively, so a
+			// differently-cased known key ("SQL", "Auth") would populate a
+			// real field on the fallback path. Decline instead of skipping
+			// it as unknown or the same payload behaves differently
+			// depending on which parser runs it.
+			if requestKeyVariant(key) {
+				return request{}, false
+			}
 			if !p.skipValue() {
 				return request{}, false
 			}
@@ -114,6 +125,19 @@ func parseRequestFast(payload []byte) (q request, ok bool) {
 		}
 		return request{}, false
 	}
+}
+
+// requestKeyVariant reports whether key is a case-insensitive match for a
+// request field without matching it exactly; exact matches are already
+// handled by the caller's switch. encoding/json would bind such a key to
+// the real field, so the fast parser must defer to it.
+func requestKeyVariant(key string) bool {
+	for _, known := range []string{"sql", "sqls", "auth", "auth_key", "params", "atomic", "ping"} {
+		if strings.EqualFold(key, known) {
+			return true
+		}
+	}
+	return false
 }
 
 type fastParser struct {

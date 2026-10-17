@@ -160,5 +160,12 @@ func RecoverLatest(backupDir, dataDir string) (string, error) {
 	if err := storage.WriteSnapshot(storage.SnapshotPath(dataDir), db); err != nil {
 		return "", fmt.Errorf("restore backup: %w", err)
 	}
+	// The recovered snapshot is the authority: every WAL record it covers
+	// must not replay again on the next start, or pre-recovery writes
+	// double-apply (duplicate-key failures on primary-key tables, silently
+	// duplicated rows on synthetic-key tables).
+	if err := clearWAL(dataDir); err != nil {
+		return "", err
+	}
 	return backup, nil
 }

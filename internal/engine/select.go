@@ -128,6 +128,9 @@ func (d *Database) selectRows(ctx context.Context, s string, maxRows int) (Resul
 		return "", false
 	}
 	simpleColumn, simpleValue, simple := simpleEquality(where)
+	if simple {
+		simpleValue = t.equalityKey(simpleColumn, simpleValue)
+	}
 	if simple && simpleColumn == t.primaryColumn() {
 		r := Result{Columns: names}
 		if rowIndex, fast := t.fastPos[simpleValue]; fast {
@@ -432,6 +435,23 @@ func simpleEquality(expression string) (column, value string, ok bool) {
 	return strings.ToLower(strings.TrimSpace(parts[0])), unquoteLiteral(parts[1]), true
 }
 
+// equalityKey renders a bare-equality literal to the canonical key stored
+// in Rows, fastPos, and secondary index buckets. The unquoted literal is
+// resolved against the column type exactly like compileCondition's
+// literalValue, so `id = 01`, `v = 1.50`, and `k = TRUE` hit the same key
+// the compiled scan would match instead of silently missing.
+func (t *Table) equalityKey(column, value string) string {
+	for _, c := range t.Columns {
+		if c.Name == column {
+			if v, err := parseVal(value, c.Type); err == nil {
+				return valueKey(v)
+			}
+			return value
+		}
+	}
+	return value
+}
+
 // fastTerm is a pre-resolved bare `column = value` predicate: the column
 // index is looked up once per query instead of once per row, and kind
 // selects a type-specialized comparison. kindFastGeneric preserves the exact
@@ -714,6 +734,7 @@ func aggregateResult(ctx context.Context, t *Table, expression, where string) (R
 			return Result{Columns: []string{aggName}, Rows: [][]any{{len(t.Rows)}}}, nil
 		}
 		if simpleColumn, simpleValue, simple := simpleEquality(where); simple {
+			simpleValue = t.equalityKey(simpleColumn, simpleValue)
 			if simpleColumn == t.primaryColumn() {
 				count := 0
 				if _, exists := t.Rows[simpleValue]; exists {
