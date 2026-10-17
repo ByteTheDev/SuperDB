@@ -1,19 +1,26 @@
 @everyone
 
-**SuperDB — Bug-Fix & Performance Update (PR #5 merged)**
+**SuperDB v0.6.0 — SQL Surface, Integrity & TLS**
 
-Engine:
-- WHERE now supports !=, <>, <, <=, >, >= everywhere (was silently broken)
-- '' escapes to ' in literals; apostrophes round-trip via params
-- Unknown columns in WHERE/ORDER BY/aggregates now error
-- ORDER BY spacing fix; non-PK tables work; multibyte CREATE INDEX fix
+SQL:
+- New DDL/introspection: CREATE INDEX, ALTER ADD/DROP COLUMN, DROP TABLE/INDEX, TRUNCATE, SHOW TABLES/COLUMNS/INDEX, DESCRIBE
+- GROUP BY + HAVING over COUNT/SUM/MIN/MAX/AVG
+- SELECT DISTINCT, OFFSET, and WHERE IN / BETWEEN / LIKE
+- INSERT OR REPLACE (in-place upsert) and INSERT INTO ... SELECT
+- New interactive superdb-cli shell (.format, .timing, multi-line) plus --file/--format/--timing/--ping
 
-Client/Server:
-- Client.Close sends TypeClose; dead connections fail fast
-- Connection strings no longer double-decode %XX
-- Local atomic batches are truly atomic
-- Unset query timeout = unbounded; remote auth + MaxConnections fixed
+Storage & backups:
+- Snapshot/WAL frames now carry a CRC-32C checksum (v3); older files still readable
+- Backups write a SHA-256 manifest; verify with `superdb verify-backup [FILE|DIR]`
+- compact/recover now remove the WAL so folded records can't double-apply on restart
 
-Perf: JSON U+2028/29 parity, dead code removed, fewer cluster allocs.
+Server:
+- Local-server TLS 1.2+: `server --tls-cert/--tls-key`; clients use `--tls`/`--tls-ca`/`--tls-skip-verify`
+- Protocol `params` for `?` placeholders; hosted `/ready` readiness + `/metrics`
 
-Storage/WAL/wire unchanged — fully compatible. All tests + race pass.
+Fixed: typed-equality SELECT fast paths (id = 01, v = 1.50, k = TRUE), case-variant JSON keys,
+unknown-column/aggregate validation, WAL writer after close.
+
+Storage/protocol changes are backward compatible. All tests + race pass.
+
+Download: https://github.com/ByteTheDev/SuperDB/releases/tag/v0.6.0
