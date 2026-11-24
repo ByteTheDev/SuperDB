@@ -1,0 +1,11 @@
+# Normalize line endings; keep binary assets untouched.
+* text=auto
+*.exe binary
+*.sdb binary
+*.sdb.tmp binary
+*.db binary
+*.db-wal binary
+*.db-shm binary
+*.db-journal binary
+*.o binary
+*.a binary
