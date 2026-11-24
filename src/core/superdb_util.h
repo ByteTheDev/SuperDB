@@ -1,7 +1,7 @@
-/* sdb_util — small shared helpers: time, little-endian codecs, fsync.
+/* superdb_util — small shared helpers: time, little-endian codecs, fsync.
  * Portable C99, no dependencies. Part of SuperDB core (private). */
-#ifndef SDB_UTIL_H
-#define SDB_UTIL_H
+#ifndef SUPERDB_UTIL_H
+#define SUPERDB_UTIL_H
 
 #include <stddef.h>
 #include <stdint.h>

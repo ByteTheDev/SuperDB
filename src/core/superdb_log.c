@@ -1,7 +1,7 @@
-/* sdb_log — implementation. See sdb_log.h. */
-#include "sdb_log.h"
-#include "sdb_crc.h"
-#include "sdb_store.h"
+/* superdb_log — implementation. See superdb_log.h. */
+#include "superdb_log.h"
+#include "superdb_crc.h"
+#include "superdb_store.h"
 
 #include <stdlib.h>
 #include <string.h>

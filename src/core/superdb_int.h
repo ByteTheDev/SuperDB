@@ -1,10 +1,10 @@
-/* sdb_int — private SuperDB internals shared by core modules.
+/* superdb_int — private SuperDB internals shared by core modules.
  * NOT part of the public API (see include/superdb.h). */
-#ifndef SDB_INT_H
-#define SDB_INT_H
+#ifndef SUPERDB_INT_H
+#define SUPERDB_INT_H
 
 #include "superdb.h"
-#include "sdb_util.h"
+#include "superdb_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -11,6 +11,7 @@
 # keep shipped Windows binaries
 !bin/superdb-server.exe
 !bin/superdb-cli.exe
+!bin/superdb.exe
 # databases & scratch
 *.sdb
 *.sdb.tmp

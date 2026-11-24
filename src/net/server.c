@@ -1,6 +1,6 @@
 /* superdb-server — tiny TCP server for SuperDB.
  * select() loop, one process, up to MAX_CLIENTS connections.
- * Wire format + command dispatch live in sdb_resp / sdb_cmd; this file
+ * Wire format + command dispatch live in superdb_resp / superdb_cmd; this file
  * only owns sockets, client buffers and the event loop.
  * Portable: POSIX sockets + Winsock.
  */
@@ -20,6 +20,8 @@ typedef SOCKET sock_t;
 #else
 #  include <sys/types.h>
 #  include <sys/socket.h>
+#  include <sys/select.h>
+#  include <sys/time.h>
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
 #  include <netdb.h>
@@ -38,8 +40,8 @@ typedef int sock_t;
 #include <inttypes.h>
 
 #include "superdb.h"
-#include "sdb_resp.h"
-#include "sdb_cmd.h"
+#include "superdb_resp.h"
+#include "superdb_cmd.h"
 
 #ifndef MAX_CLIENTS
 #define MAX_CLIENTS 256

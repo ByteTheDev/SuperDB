@@ -1,5 +1,5 @@
-/* sdb_store — implementation. See sdb_store.h. */
-#include "sdb_store.h"
+/* superdb_store — implementation. See superdb_store.h. */
+#include "superdb_store.h"
 
 void sdb_rehash(superdb_t *db, size_t want) {
     size_t nb = sdb_pow2(want < 16 ? 16 : want);

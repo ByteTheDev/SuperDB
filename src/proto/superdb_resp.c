@@ -1,5 +1,5 @@
-/* sdb_resp — implementation. See sdb_resp.h. */
-#include "sdb_resp.h"
+/* superdb_resp — implementation. See superdb_resp.h. */
+#include "superdb_resp.h"
 
 #include <stdio.h>
 #include <stdlib.h>

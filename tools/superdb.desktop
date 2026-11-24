@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SuperDB Inspector
+Comment=Inspect SuperDB .sdb databases
+Exec=superdb inspect %f
+MimeType=application/x-superdb;
+Categories=Development;Database;
+Terminal=true
+NoDisplay=false

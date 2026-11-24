@@ -1,4 +1,4 @@
-/* sdb_client — implementation. See sdb_client.h.
+/* superdb_client — implementation. See superdb_client.h.
  * Moved verbatim out of the old monolithic cli.c. */
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -22,7 +22,7 @@ typedef int sock_t;
 #  define sock_close close
 #endif
 
-#include "sdb_client.h"
+#include "superdb_client.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,0 +1,16 @@
+# demo — SuperDB command script (.sdbc)
+# Run it from the repo root with the VS Code command
+# "SuperDB: Run script file", or line by line via the CLI:
+#   superdb set greeting hello
+
+SET greeting hello
+SET counter 0
+INCR counter
+INCR counter 4
+SET session:1 abc123 EX 3600
+GET greeting
+TTL session:1
+KEYS *
+KEYS session:*
+DBSIZE
+INFO

@@ -1,14 +1,14 @@
 /* superdb — public API: open/close, CRUD, expiry, counters, batching.
  * Wires together the core modules:
- *   sdb_util  time/codecs/fsync      sdb_crc   record checksums
- *   sdb_store in-memory hash index   sdb_log   append-only log + compaction
+ *   superdb_util  time/codecs/fsync      superdb_crc   record checksums
+ *   superdb_store in-memory hash index   superdb_log   append-only log + compaction
  * Portable C99, no dependencies. Thread-safe via the db mutex.
  */
 #include "superdb.h"
-#include "sdb_int.h"
-#include "sdb_store.h"
-#include "sdb_log.h"
-#include "sdb_crc.h"
+#include "superdb_int.h"
+#include "superdb_store.h"
+#include "superdb_log.h"
+#include "superdb_crc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
