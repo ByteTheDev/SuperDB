@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(superdb VERSION 1.1.0 LANGUAGES C)
+project(superdb VERSION 2.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -14,31 +14,41 @@ else()
   add_compile_options(-Wall -Wextra)
 endif()
 
-# --- core library: util + crc + store + log + public API ---
-add_library(superdb STATIC
-  src/core/superdb_util.c
-  src/core/superdb_crc.c
-  src/core/superdb_store.c
-  src/core/superdb_log.c
-  src/core/superdb.c
-)
-target_include_directories(superdb PUBLIC include PRIVATE src/core)
-
-# --- protocol + command dispatch (tools only) ---
-add_library(superdb_proto STATIC src/proto/superdb_resp.c src/proto/superdb_cmd.c)
-target_include_directories(superdb_proto PUBLIC src/proto PRIVATE include)
-target_link_libraries(superdb_proto PUBLIC superdb)
+find_package(Threads REQUIRED)
 
 # _POSIX_C_SOURCE exposes fileno/ftruncate/off_t & co. under strict -std=c99.
 if(NOT WIN32)
   add_compile_definitions(_POSIX_C_SOURCE=200809L)
 endif()
 
-find_package(Threads REQUIRED)
+# --- core library: util + crc + thread + glob + coll + store + log + public API ---
+add_library(superdb STATIC
+  src/core/superdb_util.c
+  src/core/superdb_crc.c
+  src/core/superdb_thread.c
+  src/core/superdb_glob.c
+  src/core/superdb_coll.c
+  src/core/superdb_store.c
+  src/core/superdb_log.c
+  src/core/superdb.c
+)
+target_include_directories(superdb PUBLIC include PRIVATE src/core)
+target_link_libraries(superdb PUBLIC Threads::Threads)
+
+# --- protocol + command dispatch + networking (tools only) ---
+add_library(superdb_proto STATIC
+  src/proto/superdb_resp.c src/proto/superdb_cmd.c
+  src/net/superdb_net.c src/net/superdb_repl.c
+)
+target_include_directories(superdb_proto PUBLIC src/proto PRIVATE src/core src/net include)
+target_link_libraries(superdb_proto PUBLIC superdb)
+if(WIN32)
+  target_link_libraries(superdb_proto PUBLIC ws2_32)
+endif()
 
 # --- server + cli + project tool ---
 add_executable(superdb-server src/net/server.c)
-target_include_directories(superdb-server PRIVATE src/net src/proto include)
+target_include_directories(superdb-server PRIVATE src/core src/net src/proto include)
 target_link_libraries(superdb-server PRIVATE superdb_proto superdb Threads::Threads)
 
 add_executable(superdb-cli src/net/superdb_client.c src/cli/cli.c)
@@ -57,21 +67,25 @@ endif()
 
 # --- tests ---
 enable_testing()
-add_executable(test_basic tests/test_basic.c)
-target_include_directories(test_basic PRIVATE include)
-target_link_libraries(test_basic PRIVATE superdb Threads::Threads)
-add_test(NAME basic COMMAND test_basic)
+# core-only: basic, batch, typed values, transactions, compaction, replication
+foreach(t basic batch types txn compact repl)
+  add_executable(test_${t} tests/test_${t}.c)
+  target_include_directories(test_${t} PRIVATE include src/core)
+  target_link_libraries(test_${t} PRIVATE superdb Threads::Threads)
+  add_test(NAME ${t} COMMAND test_${t})
+endforeach()
 
-add_executable(test_batch tests/test_batch.c)
-target_include_directories(test_batch PRIVATE include)
-target_link_libraries(test_batch PRIVATE superdb Threads::Threads)
-add_test(NAME batch COMMAND test_batch)
+# command layer: needs the command dispatcher and the networking/replica modules
+foreach(t cmd fuzz)
+  add_executable(test_${t} tests/test_${t}.c)
+  target_include_directories(test_${t} PRIVATE include src src/core src/proto src/net)
+  target_link_libraries(test_${t} PRIVATE superdb_proto superdb Threads::Threads)
+  add_test(NAME ${t} COMMAND test_${t})
+endforeach()
 
 add_executable(test_resp tests/test_resp.c)
 target_include_directories(test_resp PRIVATE src/proto)
 target_link_libraries(test_resp PRIVATE superdb_proto)
-# test_resp only needs superdb_resp; link the single object via library subset:
-# (superdb_proto pulls superdb — harmless for a pure-protocol test)
 add_test(NAME resp COMMAND test_resp)
 
 # tool roundtrip (offline kv + dump/restore + init/install); needs the

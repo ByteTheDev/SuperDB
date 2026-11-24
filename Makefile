@@ -1,8 +1,8 @@
-# SuperDB build — modular C99, no dependencies besides libc
+# SuperDB build - modular C99, no dependencies besides libc
 # (POSIX: threads from libc; Windows: ws2_32 for the tools).
 #
-#   make            server + cli
-#   make test       all unit tests (core, batch, protocol)
+#   make            server + cli + project tool
+#   make test       all unit tests + tool roundtrip
 #   make bench      quick perf check (nosync + durable batch)
 #   make examples   example programs
 #   make install    install headers/lib/bins (PREFIX, default /usr/local)
@@ -12,7 +12,7 @@ CC      ?= gcc
 CFLAGS  ?= -std=c99 -O2 -Wall -Wextra
 # _POSIX_C_SOURCE exposes fileno/ftruncate/off_t & co. under strict -std=c99
 # (glibc hides them in strict-ANSI mode). Harmless on Windows toolchains.
-CPPFLAGS += -Iinclude -Isrc -Isrc/core -Isrc/proto -Isrc/net -D_POSIX_C_SOURCE=200809L
+CPPFLAGS += -Iinclude -Isrc -Isrc/core -Isrc/proto -Isrc/net -Isrc/cli -D_POSIX_C_SOURCE=200809L
 LDFLAGS ?=
 LDLIBS  ?=
 DEPFLAGS = -MMD -MP
@@ -32,9 +32,13 @@ else
 endif
 
 # --- module groups (see docs/ARCHITECTURE.md) ---
-CORE_SRCS  := src/core/superdb_util.c src/core/superdb_crc.c src/core/superdb_store.c src/core/superdb_log.c src/core/superdb.c
+CORE_SRCS  := src/core/superdb_util.c src/core/superdb_crc.c \
+              src/core/superdb_thread.c src/core/superdb_glob.c \
+              src/core/superdb_coll.c src/core/superdb_store.c \
+              src/core/superdb_log.c src/core/superdb.c
 PROTO_SRCS := src/proto/superdb_resp.c
 CMD_SRCS   := src/proto/superdb_cmd.c
+NET_SRCS   := src/net/superdb_net.c src/net/superdb_repl.c
 SERVER_SRCS := src/net/server.c
 TOOL_SRCS   := src/cli/superdb_tool.c
 CLIENT_SRCS := src/net/superdb_client.c src/cli/cli.c
@@ -42,8 +46,9 @@ CLIENT_SRCS := src/net/superdb_client.c src/cli/cli.c
 CORE_OBJS  := $(CORE_SRCS:.c=.o)
 PROTO_OBJS := $(PROTO_SRCS:.c=.o)
 CMD_OBJS   := $(CMD_SRCS:.c=.o)
+NET_OBJS   := $(NET_SRCS:.c=.o)
 
-SERVER_OBJS := $(SERVER_SRCS:.c=.o) $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS)
+SERVER_OBJS := $(SERVER_SRCS:.c=.o) $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(NET_OBJS)
 TOOL_OBJS   := $(TOOL_SRCS:.c=.o) $(CORE_OBJS)
 CLI_OBJS    := $(CLIENT_SRCS:.c=.o)
 
@@ -52,11 +57,13 @@ BIN_CLI    := bin/superdb-cli$(EXE)
 BIN_TOOL   := bin/superdb$(EXE)
 LIB_STATIC := lib/libsuperdb.a
 
-TESTS := tests/test_basic$(EXE) tests/test_batch$(EXE) tests/test_resp$(EXE)
+TESTS := tests/test_basic$(EXE) tests/test_batch$(EXE) tests/test_resp$(EXE) \
+         tests/test_types$(EXE) tests/test_txn$(EXE) tests/test_cmd$(EXE) \
+         tests/test_compact$(EXE) tests/test_repl$(EXE) tests/test_fuzz$(EXE)
 BENCH_SDB := bench/bench_sdb$(EXE)
 EXAMPLES := examples/example$(EXE) examples/batch$(EXE)
 
-ALL_OBJS := $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(SERVER_SRCS:.c=.o) $(TOOL_SRCS:.c=.o) $(CLIENT_SRCS:.c=.o)
+ALL_OBJS := $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(NET_OBJS) $(SERVER_SRCS:.c=.o) $(TOOL_SRCS:.c=.o) $(CLIENT_SRCS:.c=.o)
 
 all: $(BIN_SERVER) $(BIN_CLI) $(BIN_TOOL)
 
@@ -88,10 +95,37 @@ tests/test_batch$(EXE): tests/test_batch.c $(CORE_OBJS)
 tests/test_resp$(EXE): tests/test_resp.c $(PROTO_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+# typed values, transactions, commands, replication, fuzzing: core + command layer
+CMD_TEST_OBJS := $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(NET_OBJS)
+
+tests/test_types$(EXE): tests/test_types.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_txn$(EXE): tests/test_txn.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_compact$(EXE): tests/test_compact.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_repl$(EXE): tests/test_repl.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_cmd$(EXE): tests/test_cmd.c $(CMD_TEST_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_fuzz$(EXE): tests/test_fuzz.c $(CMD_TEST_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
 test check: $(BIN_SERVER) $(BIN_CLI) $(BIN_TOOL) $(TESTS)
 	./tests/test_basic$(EXE)
 	./tests/test_batch$(EXE)
 	./tests/test_resp$(EXE)
+	./tests/test_types$(EXE)
+	./tests/test_txn$(EXE)
+	./tests/test_compact$(EXE)
+	./tests/test_repl$(EXE)
+	./tests/test_cmd$(EXE)
+	./tests/test_fuzz$(EXE)
 	sh tests/test_tool.sh
 
 # --- benchmarks & examples ---

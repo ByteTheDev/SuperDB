@@ -18,8 +18,9 @@
 
 static void usage(const char *p) {
     fprintf(stderr,
-        "Usage: %s [-h HOST] [-p PORT] [-i] [command args...]\n"
+        "Usage: %s [-h HOST] [-p PORT] [-a PASSWORD] [-i] [command args...]\n"
         "  No command (or -i) enters an interactive REPL.\n"
+        "  The password may also come from the SUPERDB_PASSWORD environment variable.\n"
         "  Examples:\n"
         "    %s SET foo bar\n"
         "    %s GET foo\n"
@@ -28,6 +29,7 @@ static void usage(const char *p) {
 
 int main(int argc, char **argv) {
     const char *host = "127.0.0.1";
+    const char *password = getenv("SUPERDB_PASSWORD");
     int port = 7381;
     int interactive = 0;
     int i, cmd_start = 1;
@@ -35,6 +37,7 @@ int main(int argc, char **argv) {
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 && i + 1 < argc) { host = argv[++i]; cmd_start = i + 1; }
         else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) { port = atoi(argv[++i]); cmd_start = i + 1; }
+        else if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) { password = argv[++i]; cmd_start = i + 1; }
         else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interactive") == 0) { interactive = 1; cmd_start = i + 1; }
         else if (strcmp(argv[i], "--help") == 0) { usage(argv[0]); return 0; }
         else break;
@@ -49,6 +52,13 @@ int main(int argc, char **argv) {
 #endif
 
     if (sdb_client_connect(host, port) != 0) return 1;
+
+    if (password && *password) {
+        char *auth[2];
+        auth[0] = "AUTH";
+        auth[1] = (char*)password;
+        if (sdb_client_command(2, auth) != 0) { sdb_client_close(); return 1; }
+    }
 
     if (cmd_start < argc && !interactive) {
         int rc = sdb_client_command(argc - cmd_start, argv + cmd_start);

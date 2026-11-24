@@ -144,6 +144,11 @@ static long file_size(const char *p) {
     return n;
 }
 
+/* SDB2 is current; SDB1 files are migrated by superdb_open() on read. */
+static int is_sdb_magic(const unsigned char *m) {
+    return memcmp(m, "SDB2", 4) == 0 || memcmp(m, "SDB1", 4) == 0;
+}
+
 static void path_join(char *out, size_t cap, const char *a, const char *b) {
     size_t al = strlen(a);
     if (al == 0) {
@@ -982,10 +987,11 @@ static int cmd_inspect(int argc, char **argv) {
     if (f) {
         if (fread(magic, 1, 4, f) == 4)
             printf("magic: %c%c%c%c (%s)\n", magic[0], magic[1], magic[2], magic[3],
-                   memcmp(magic, "SDB1", 4) == 0 ? "SuperDB v1" : "UNKNOWN");
+                   memcmp(magic, "SDB2", 4) == 0 ? "SuperDB v2" :
+                   memcmp(magic, "SDB1", 4) == 0 ? "SuperDB v1 (legacy)" : "UNKNOWN");
         fclose(f);
     }
-    if (memcmp(magic, "SDB1", 4) != 0) {
+    if (!is_sdb_magic(magic)) {
         warnmsg("not a SuperDB file (bad magic).");
         return 1;
     }
@@ -1538,7 +1544,10 @@ static int cmd_assoc(int argc, char **argv) {
             "  <mime-type type=\"application/x-superdb\">\n"
             "    <comment>SuperDB database</comment>\n"
             "    <glob pattern=\"*.sdb\"/>\n"
-            "    <magic><match type=\"string\" value=\"SDB1\" offset=\"0\"/></magic>\n"
+            "    <magic>\n"
+            "      <match type=\"string\" value=\"SDB2\" offset=\"0\"/>\n"
+            "      <match type=\"string\" value=\"SDB1\" offset=\"0\"/>\n"
+            "    </magic>\n"
             "  </mime-type>\n"
             "</mime-info>\n";
         const char *desk =
@@ -1619,7 +1628,7 @@ static int cmd_doctor(int argc, char **argv) {
         FILE *f = fopen(dbp, "rb");
         char m[4] = {0, 0, 0, 0};
         if (f) { fread(m, 1, 4, f); fclose(f); }
-        if (sz >= 4 && memcmp(m, "SDB1", 4) == 0)
+        if (sz >= 4 && is_sdb_magic((const unsigned char*)m))
             printf("[ok] db: '%s' (%ld bytes, valid magic)\n", dbp, sz);
         else {
             printf("[!!] db: '%s' (%ld bytes, BAD magic)\n", dbp, sz);

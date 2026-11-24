@@ -9,13 +9,18 @@ src/
     superdb_util.h/.c       time, little-endian codecs, fsync, atomic replace
     superdb_crc.h/.c        CRC32 table + streaming (record integrity)
     superdb_store.h/.c      in-memory hash index (chained, cached hash+len)
+    superdb_coll.h/.c       list/hash/set value containers
+    superdb_glob.h/.c       glob matching for SCAN
+    superdb_thread.h/.c     mutex + thread primitives
     superdb_log.h/.c        append-only log: encode, replay, compaction
   proto/                wire protocol — no db, no sockets
     superdb_resp.h/.c       RESP-subset framing: reply builders + request parsers
-    superdb_cmd.h/.c        command dispatch (argv -> db -> RESP reply)
+    superdb_cmd.h/.c        table-driven commands (auth, MULTI, stats, slowlog)
   net/                  sockets only (thin transport)
-    server.c            TCP sockets + select() event loop
+    server.c            TCP accept loop, one connection thread per client
     superdb_client.h/.c     blocking client transport (used by cli)
+    superdb_net.h/.c        socket helpers shared by server and replica client
+    superdb_repl.h/.c       log replication client (primary -> replica)
   cli/                  user-facing entry points (thin)
     cli.c               arg parsing + REPL
     superdb_tool.c      `superdb` project manager + offline toolkit
@@ -37,8 +42,9 @@ client --RESP--> server.c --argv--> superdb_cmd --superdb_*--> superdb.c
 ```
 
 `server.c` never touches the db directly — everything goes through
-`sdb_execute()`. `superdb_resp` never touches the db at all, which is why
-it has fast dependency-free unit tests.
+`sdb_dispatch()` in the command layer. `superdb_resp` never touches the db at
+all, which is why it has fast dependency-free unit tests. The replica client in
+`src/net/superdb_repl.*` feeds primary log bytes into the same core.
 
 ## Ownership rules
 
@@ -50,16 +56,18 @@ it has fast dependency-free unit tests.
   goes through the public API or the small `_locked` helpers.
 - `_locked` suffix = caller must hold the db mutex.
 - On-disk format is owned by `superdb_log.h` (`SDB_MAGIC`, record layout).
-  It is stable since 1.0 — change it only with a version bump + migration
-  in the replay path.
+  It is SDB2 (since 2.0); SDB1 files are migrated in the replay path. Change it
+  only with a version bump + migration.
 - `superdb_cmd.c` may copy keys (NUL-safety) but must never retain pointers
   into request buffers.
 
 ## Adding a command
 
-1. Implement in `src/proto/superdb_cmd.c` (`sdb_execute`), reply with `sb_*`.
-2. Add cases to `tests/test_resp.c` if parsing is involved, or extend
-   `tests/test_basic.c` for core semantics.
+1. Implement a handler in `src/proto/superdb_cmd.c` and add its name, arity and
+   flags to `cmd_tab`; reply with `sb_*`.
+2. Add cases to `tests/test_resp.c` if parsing is involved, `tests/test_cmd.c`
+   for dispatch, or the relevant core suite (`test_basic`, `test_types`,
+   `test_txn`, `test_repl`, `test_compact`).
 3. Document in `docs/PROTOCOL.md` and the `COMMAND`/`HELP` string.
 
 ## Adding a core op
