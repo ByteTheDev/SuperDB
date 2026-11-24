@@ -1,0 +1,33 @@
+# build outputs
+*.o
+*.obj
+*.d
+*.a
+*.lib
+*.exe
+*.dll
+*.pdb
+*.ilk
+# keep shipped Windows binaries
+!bin/superdb-server.exe
+!bin/superdb-cli.exe
+# databases & scratch
+*.sdb
+*.sdb.tmp
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.bin
+# cmake / build dirs
+build/
+build-*/
+cmake-build-*/
+out/
+# editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
