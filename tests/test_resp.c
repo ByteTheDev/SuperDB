@@ -1,11 +1,11 @@
-/* test_resp — unit tests for sdb_resp (no db needed).
+/* test_resp — unit tests for superdb_resp (no db needed).
  * Checks reply builders and both request parsers, incl. binary safety.
  */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
-#include "sdb_resp.h"
+#include "superdb_resp.h"
 
 #define CHECK(c, msg) do { \
     if (!(c)) { printf("FAIL: %s (line %d)\n", msg, __LINE__); return 1; } \

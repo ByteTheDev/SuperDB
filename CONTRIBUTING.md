@@ -28,7 +28,7 @@ ctest --test-dir build
 - `-Wall -Wextra` must be clean on gcc (MSVC `/W3` should be quiet too).
 - Public API lives in `include/superdb.h` only. Keep it backward compatible;
   new functions are fine, changing signatures is not.
-- On-disk format (`src/sdb_log.h`) is stable. If you must change it, bump
+- On-disk format (`src/core/superdb_log.h`) is stable. If you must change it, bump
   the version and keep loading old files.
 - Every behavior change needs a test: core -> `tests/test_basic.c`,
   batching -> `tests/test_batch.c`, protocol -> `tests/test_resp.c`.

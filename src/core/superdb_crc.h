@@ -1,7 +1,7 @@
-/* sdb_crc — CRC32 (IEEE) with table-driven fast path + streaming update.
+/* superdb_crc — CRC32 (IEEE) with table-driven fast path + streaming update.
  * Same digests as the original bitwise version. Private to SuperDB core. */
-#ifndef SDB_CRC_H
-#define SDB_CRC_H
+#ifndef SUPERDB_CRC_H
+#define SUPERDB_CRC_H
 
 #include <stddef.h>
 #include <stdint.h>

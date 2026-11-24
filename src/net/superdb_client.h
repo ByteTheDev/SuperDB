@@ -1,9 +1,9 @@
-/* sdb_client — blocking RESP client transport for superdb-cli.
+/* superdb_client — blocking RESP client transport for superdb-cli.
  * Connect, send a command, read one reply, pretty-print it.
  * Private to SuperDB tools (not the embedded library API).
  */
-#ifndef SDB_CLIENT_H
-#define SDB_CLIENT_H
+#ifndef SUPERDB_CLIENT_H
+#define SUPERDB_CLIENT_H
 
 /* 0 = connected, -1 = failed (message already printed). */
 int sdb_client_connect(const char *host, int port);

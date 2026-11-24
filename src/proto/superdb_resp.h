@@ -1,9 +1,9 @@
-/* sdb_resp — RESP-subset framing: reply builders + request parsers.
+/* superdb_resp — RESP-subset framing: reply builders + request parsers.
  * Shared by the server and unit-tested in tests/test_resp.c.
  * No SuperDB core dependency (pure bytes in, structured args out).
  */
-#ifndef SDB_RESP_H
-#define SDB_RESP_H
+#ifndef SUPERDB_RESP_H
+#define SUPERDB_RESP_H
 
 #include <stddef.h>
 #include <stdint.h>

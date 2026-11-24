@@ -1,6 +1,6 @@
-/* sdb_util — implementation. See sdb_util.h. */
-#include "sdb_util.h"
-#include "sdb_int.h"
+/* superdb_util — implementation. See superdb_util.h. */
+#include "superdb_util.h"
+#include "superdb_int.h"
 
 #include <string.h>
 

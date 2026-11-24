@@ -1,9 +1,9 @@
 /* superdb-cli — command-line client for superdb-server.
  * One-shot: superdb-cli [opts] GET foo
  * REPL:     superdb-cli [opts]          (or -i)
- * Transport lives in sdb_client; this file is arg parsing + REPL.
+ * Transport lives in superdb_client; this file is arg parsing + REPL.
  */
-#include "sdb_client.h"
+#include "superdb_client.h"
 
 #include <stdio.h>
 #include <stdlib.h>

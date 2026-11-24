@@ -1,7 +1,7 @@
 # SuperDB wire protocol (v1)
 
 RESP subset (Redis-compatible framing) plus inline telnet commands.
-Implemented in `src/sdb_resp.*`, dispatched in `src/sdb_cmd.c`.
+Implemented in `src/proto/superdb_resp.*`, dispatched in `src/proto/superdb_cmd.c`.
 
 ## Requests
 

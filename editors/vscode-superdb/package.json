@@ -1,0 +1,145 @@
+{
+  "name": "vscode-superdb",
+  "displayName": "SuperDB",
+  "description": "SuperDB toolkit: .sdb inspector, command-script highlighting, and project commands.",
+  "version": "0.1.0",
+  "publisher": "superdb",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Databases",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:superdb-script",
+    "onCustomEditor:superdb.inspector",
+    "onCommand:superdb.init",
+    "onCommand:superdb.inspectActive",
+    "onCommand:superdb.inspectFile",
+    "onCommand:superdb.startServer",
+    "onCommand:superdb.stopServer",
+    "onCommand:superdb.serverStatus",
+    "onCommand:superdb.dumpDatabase",
+    "onCommand:superdb.runScript"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "superdb-script",
+        "aliases": ["SuperDB Script", "superdb-script"],
+        "extensions": [".sdbc"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "superdb-script",
+        "scopeName": "source.superdb",
+        "path": "./syntaxes/superdb.tmGrammar.json"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "superdb.inspector",
+        "displayName": "SuperDB Inspector",
+        "selector": [
+          {
+            "filenamePattern": "*.sdb"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "superdb.init",
+        "title": "SuperDB: Initialize project in workspace"
+      },
+      {
+        "command": "superdb.inspectActive",
+        "title": "SuperDB: Inspect active .sdb file"
+      },
+      {
+        "command": "superdb.inspectFile",
+        "title": "SuperDB: Inspect this database"
+      },
+      {
+        "command": "superdb.startServer",
+        "title": "SuperDB: Start server"
+      },
+      {
+        "command": "superdb.stopServer",
+        "title": "SuperDB: Stop server"
+      },
+      {
+        "command": "superdb.serverStatus",
+        "title": "SuperDB: Server status"
+      },
+      {
+        "command": "superdb.dumpDatabase",
+        "title": "SuperDB: Dump database to JSON"
+      },
+      {
+        "command": "superdb.runScript",
+        "title": "SuperDB: Run script file (.sdbc)"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "superdb.inspectFile",
+          "when": "resourceFilename =~ /\\.sdb$/",
+          "group": "superdb"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "superdb.inspectActive",
+          "when": "resourceFilename =~ /\\.sdb$/",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "superdb.runScript",
+          "when": "editorLangId == superdb-script"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SuperDB",
+      "properties": {
+        "superdb.binaryPath": {
+          "type": "string",
+          "default": "superdb",
+          "description": "Path to the `superdb` project CLI binary."
+        },
+        "superdb.db": {
+          "type": "string",
+          "default": "",
+          "description": "Default database file. Empty = read ./superdb.json, else ./${workspaceFolderBasename}.sdb fallback."
+        },
+        "superdb.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Server host for start/status commands."
+        },
+        "superdb.port": {
+          "type": "number",
+          "default": 7381,
+          "description": "Server port for start/status commands."
+        }
+      }
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": "superdb.json",
+        "url": "./schemas/superdb-config.schema.json"
+      }
+    ]
+  }
+}

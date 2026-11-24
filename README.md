@@ -5,9 +5,10 @@ Local-first: your data lives in a single append-only log file on disk,
 with an in-memory hash index. Optional TCP server + CLI included.
 
 ```
+bin/superdb.exe          project CLI: init/install, offline get/set/dump, serve/start/stop, .sdb assoc
 bin/superdb-server.exe   TCP server (select loop, 256 clients)
 bin/superdb-cli.exe      one-shot client + REPL
-include/superdb.h        embeddable library (core modules in src/sdb_*)
+include/superdb.h        embeddable library (core modules in src/core/*)
 lib/libsuperdb.a         static lib (util/crc/store/log/api)
 ```
 
@@ -27,6 +28,25 @@ bin\superdb-cli.exe SET hello world
 bin\superdb-cli.exe GET hello
 bin\superdb-cli.exe            :: interactive REPL
 ```
+
+### Project CLI (`superdb`)
+
+Scaffold a repo, work offline (no server), manage the server lifecycle —
+see [`docs/CLI.md`](docs/CLI.md):
+
+```sh
+superdb init myapp --db ./data.sdb   # superdb.json + .vscode/ + .gitignore + example
+superdb install myapp                # vendor src/core/ into third_party/superdb
+superdb set greeting hello           # offline, direct on the .sdb file
+superdb get greeting
+superdb dump --out backup.json       # JSON backup (values base64, TTLs kept)
+superdb start / stop / status        # background server via pid file
+superdb doctor                        # binaries, config, db health, assoc
+superdb assoc                         # register the .sdb file association
+```
+
+Plus a VS Code extension (`.sdb` inspector, `.sdbc` script highlighting,
+one-click server commands) — see [`docs/VSCODE.md`](docs/VSCODE.md).
 
 ### POSIX (make)
 
@@ -52,7 +72,7 @@ superdb_close(db);
 ```
 
 See `examples/example.c`. Compile against the static lib (or add all
-`src/sdb_*.c` + `src/superdb.c` to your build):
+`src/core/*.c` to your build):
 
 ```sh
 make lib                       # produces lib/libsuperdb.a
@@ -170,18 +190,18 @@ v1 files load as-is.
 ```
 include/superdb.h       public API (CRUD, expiry, counters, group commit)
 src/
-  sdb_int.h             private structs + lock helpers
-  sdb_util/sdb_crc      time, codecs, fsync, checksums
-  sdb_store             in-memory hash index
-  sdb_log               append-only log + compaction
-  superdb.c             public API implementation
-  sdb_resp/sdb_cmd      protocol framing + command dispatch
-  server.c              TCP select() loop (thin)
-  sdb_client/cli.c      CLI transport + REPL (thin)
-tests/                  test_basic, test_batch, test_resp (protocol unit tests)
+  core/                 embeddable engine: superdb.c (API), superdb_int (structs),
+                        superdb_util/superdb_crc, superdb_store (index), superdb_log (log)
+  proto/                wire protocol: superdb_resp (framing) + superdb_cmd (dispatch)
+  net/                  sockets: server.c (select loop), superdb_client (transport)
+  cli/                  entry points: cli.c (REPL), superdb_tool.c (superdb CLI)
+tests/                  test_basic, test_batch, test_resp (protocol unit tests),
+                        test_tool.sh (project-CLI roundtrip)
 bench/                  bench_sdb, bench_sqlite, probe_fsync
-examples/               example (embed), batch (group commit)
-docs/                   ARCHITECTURE.md, PROTOCOL.md
+examples/               example (embed), batch (group commit), demo.sdbc (script)
+editors/vscode-superdb/ VS Code extension (.sdb inspector, .sdbc grammar)
+tools/                  OS installers (install.sh/.bat) + .sdb association files
+docs/                   ARCHITECTURE.md, PROTOCOL.md, CLI.md, VSCODE.md
 ```
 See `docs/ARCHITECTURE.md` for the module map and ownership rules,
 `docs/PROTOCOL.md` for the wire spec, `CONTRIBUTING.md` for workflow.

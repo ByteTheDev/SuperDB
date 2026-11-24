@@ -1,7 +1,7 @@
-/* sdb_cmd — implementation. See sdb_cmd.h.
+/* superdb_cmd — implementation. See superdb_cmd.h.
  * Moved verbatim out of the old monolithic server.c; the only change is
  * that the db handle is a parameter instead of a global. */
-#include "sdb_cmd.h"
+#include "superdb_cmd.h"
 
 #include <stdio.h>
 #include <stdlib.h>

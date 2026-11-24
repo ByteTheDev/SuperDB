@@ -1,10 +1,10 @@
-/* sdb_store — in-memory hash index (separate chaining, cached hash+len).
+/* superdb_store — in-memory hash index (separate chaining, cached hash+len).
  * All functions assume the db lock is held (hence _locked suffix).
  * Private to SuperDB core. */
-#ifndef SDB_STORE_H
-#define SDB_STORE_H
+#ifndef SUPERDB_STORE_H
+#define SUPERDB_STORE_H
 
-#include "sdb_int.h"
+#include "superdb_int.h"
 
 void         sdb_rehash(superdb_t *db, size_t want);
 sdb_entry_t *sdb_lookup_h_locked(superdb_t *db, const char *key,

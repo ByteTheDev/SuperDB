@@ -1,5 +1,5 @@
-/* sdb_crc — implementation. See sdb_crc.h. */
-#include "sdb_crc.h"
+/* superdb_crc — implementation. See superdb_crc.h. */
+#include "superdb_crc.h"
 
 static uint32_t sdb_crc_tab[256];
 static int sdb_crc_tab_ok = 0;

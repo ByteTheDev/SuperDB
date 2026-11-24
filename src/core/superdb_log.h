@@ -1,14 +1,14 @@
-/* sdb_log — append-only log: record encode/decode, replay, compaction.
+/* superdb_log — append-only log: record encode/decode, replay, compaction.
  * On-disk format (little-endian, stable since 1.0):
  *   header: "SDB1" (4 bytes)
  *   record: u32 crc32(rest) | u8 op | u64 expire_at_ms | u32 klen | u32 vlen
  *           | key[klen] | val[vlen]
  *   op: 1 = SET, 2 = DEL (vlen == 0)
  * Private to SuperDB core. */
-#ifndef SDB_LOG_H
-#define SDB_LOG_H
+#ifndef SUPERDB_LOG_H
+#define SUPERDB_LOG_H
 
-#include "sdb_int.h"
+#include "superdb_int.h"
 
 #include <stdio.h>
 

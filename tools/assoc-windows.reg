@@ -1,0 +1,17 @@
+Windows Registry Editor Version 5.00
+
+; Template .sdb association for SuperDB.
+; Preferred: run `superdb assoc` — it writes these keys with your real
+; install path. Import this file only to reset the ProgID labels, then
+; fix the command path below to point at your superdb.exe.
+;
+;   "C:\path\to\superdb.exe" inspect "%1"
+
+[HKEY_CURRENT_USER\Software\Classes\.sdb]
+@="SuperDB.Database"
+
+[HKEY_CURRENT_USER\Software\Classes\SuperDB.Database]
+@="SuperDB Database"
+
+[HKEY_CURRENT_USER\Software\Classes\SuperDB.Database\shell\open\command]
+@="\"C:\\SuperDB\\bin\\superdb.exe\" inspect \"%1\""
