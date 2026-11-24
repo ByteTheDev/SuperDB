@@ -10,7 +10,9 @@
 
 CC      ?= gcc
 CFLAGS  ?= -std=c99 -O2 -Wall -Wextra
-CPPFLAGS += -Iinclude -Isrc -Isrc/core -Isrc/proto -Isrc/net
+# _POSIX_C_SOURCE exposes fileno/ftruncate/off_t & co. under strict -std=c99
+# (glibc hides them in strict-ANSI mode). Harmless on Windows toolchains.
+CPPFLAGS += -Iinclude -Isrc -Isrc/core -Isrc/proto -Isrc/net -D_POSIX_C_SOURCE=200809L
 LDFLAGS ?=
 LDLIBS  ?=
 DEPFLAGS = -MMD -MP

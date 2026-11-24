@@ -2,7 +2,7 @@
 REM Build SuperDB on Windows with gcc (MSYS2 ucrt64 / MinGW). No make needed.
 REM Modules: core/ (util/crc/store/log/api) + proto/ + net/ + cli/.
 
-set CFLAGS=-std=c99 -O2 -Wall -Wextra -Iinclude -Isrc -Isrc/core -Isrc/proto -Isrc/net
+set CFLAGS=-std=c99 -O2 -Wall -Wextra -Iinclude -Isrc -Isrc/core -Isrc/proto -Isrc/net -D_POSIX_C_SOURCE=200809L
 set CORE=src\core\superdb_util.o src\core\superdb_crc.o src\core\superdb_store.o src\core\superdb_log.o src\core\superdb.o
 
 mkdir bin 2>nul

@@ -29,6 +29,11 @@ add_library(superdb_proto STATIC src/proto/superdb_resp.c src/proto/superdb_cmd.
 target_include_directories(superdb_proto PUBLIC src/proto PRIVATE include)
 target_link_libraries(superdb_proto PUBLIC superdb)
 
+# _POSIX_C_SOURCE exposes fileno/ftruncate/off_t & co. under strict -std=c99.
+if(NOT WIN32)
+  add_compile_definitions(_POSIX_C_SOURCE=200809L)
+endif()
+
 find_package(Threads REQUIRED)
 
 # --- server + cli + project tool ---
