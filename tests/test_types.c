@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include "superdb.h"
-#include "sdb_crc.h"
+#include "superdb_crc.h"
 
 #define CHECK(c, msg) do { \
     if (!(c)) { printf("FAIL: %s (line %d)\n", msg, __LINE__); return 1; } \

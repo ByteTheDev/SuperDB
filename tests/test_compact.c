@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "superdb.h"
-#include "sdb_thread.h"
+#include "superdb_thread.h"
 
 #define CHECK(c, msg) do { \
     if (!(c)) { printf("FAIL: %s (line %d)\n", msg, __LINE__); return 1; } \

@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SuperDB project config",
+  "description": "Written by `superdb init`, read by the `superdb` CLI and the VS Code extension.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "db": {
+      "type": "string",
+      "default": "./superdb.sdb",
+      "description": "Database file path, relative to the project root unless absolute."
+    },
+    "host": {
+      "type": "string",
+      "default": "127.0.0.1",
+      "description": "Bind/connect host for `superdb serve` and `superdb start`."
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 7381,
+      "description": "TCP port for the SuperDB server."
+    },
+    "log": {
+      "type": "string",
+      "description": "Optional log file for `superdb start` (default ./superdb.log)."
+    },
+    "pidFile": {
+      "type": "string",
+      "description": "Optional pid file for `superdb start`/`stop` (default ./.superdb.pid)."
+    }
+  }
+}

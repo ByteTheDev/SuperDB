@@ -1,0 +1,8 @@
+extension.js
+package.json
+README.md
+CHANGELOG.md
+language-configuration.json
+syntaxes/**
+schemas/**
+images/**

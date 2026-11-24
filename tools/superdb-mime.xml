@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-superdb">
+    <comment>SuperDB database</comment>
+    <glob pattern="*.sdb"/>
+    <magic>
+      <match type="string" value="SDB1" offset="0"/>
+    </magic>
+  </mime-type>
+</mime-info>

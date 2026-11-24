@@ -1,0 +1,72 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "SuperDB script",
+  "scopeName": "source.superdb",
+  "fileTypes": ["sdbc"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#commands" },
+    { "include": "#strings" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.superdb",
+          "match": "#.*$"
+        },
+        {
+          "name": "comment.line.semicolon.superdb",
+          "match": ";.*$"
+        }
+      ]
+    },
+    "commands": {
+      "patterns": [
+        {
+          "name": "keyword.control.superdb",
+          "match": "(?i)\\b(PING|ECHO|SET|GET|DEL|EXISTS|KEYS|EXPIRE|TTL|PTTL|INCR|INCRBY|DBSIZE|INFO|COMPACT|SAVE|BGREWRITEAOF|FLUSHALL|QUIT|EXIT|SHUTDOWN|COMMAND|HELP)\\b"
+        },
+        {
+          "name": "constant.language.superdb",
+          "match": "(?i)\\b(EX|OK|PONG)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.superdb",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.superdb",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.superdb",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.superdb",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.superdb",
+          "match": "\\b-?\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    }
+  }
+}
