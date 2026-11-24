@@ -20,6 +20,9 @@ void sb_err(sbuf_t *s, const char *m); /* -ERR msg */
 void sb_int(sbuf_t *s, int64_t v);     /* :n */
 void sb_bulk(sbuf_t *s, const void *p, size_t n); /* $<n> bytes (NULL = $-1) */
 void sb_bulk_str(sbuf_t *s, const char *t);
+void sb_nil(sbuf_t *s);                 /* $-1 */
+void sb_array(sbuf_t *s, size_t n);     /* *<n>, elements follow */
+void sb_raw_err(sbuf_t *s, const char *m); /* -<m>, m carries its own code, e.g. "WRONGTYPE ..." */
 
 /* ASCII case-insensitive compare (used for command dispatch). */
 int sdb_cmd_eq(const char *a, const char *b);

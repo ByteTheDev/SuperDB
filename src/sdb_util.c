@@ -1,7 +1,11 @@
 /* sdb_util — implementation. See sdb_util.h. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#  define _POSIX_C_SOURCE 200809L
+#endif
 #include "sdb_util.h"
 #include "sdb_int.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -13,7 +17,27 @@
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
+#  include <time.h>
 #endif
+
+int sdb_buf_put(sdb_buf_t *b, const void *p, size_t n) {
+    if (b->n + n > b->cap) {
+        size_t nc = b->cap ? b->cap : 256;
+        unsigned char *np;
+        while (nc < b->n + n) nc *= 2;
+        np = (unsigned char*)realloc(b->p, nc);
+        if (!np) return -1;
+        b->p = np; b->cap = nc;
+    }
+    if (n) memcpy(b->p + b->n, p, n);
+    b->n += n;
+    return 0;
+}
+
+void sdb_buf_free(sdb_buf_t *b) {
+    free(b->p);
+    b->p = NULL; b->n = 0; b->cap = 0;
+}
 
 int64_t sdb_now_ms(void) {
 #ifdef _WIN32
@@ -28,6 +52,27 @@ int64_t sdb_now_ms(void) {
     gettimeofday(&tv, NULL);
     return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 #endif
+}
+
+int64_t sdb_now_us(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;  /* set once; benign race (same value) */
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (int64_t)(c.QuadPart * 1000000LL / freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+#endif
+}
+
+uint64_t sdb_rand64(uint64_t *state) {
+    uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
 }
 
 void sdb_put32le(unsigned char *b, uint32_t v) {

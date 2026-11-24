@@ -55,6 +55,18 @@ void sb_bulk_str(sbuf_t *s, const char *t) {
     else sb_bulk(s, t, strlen(t));
 }
 
+void sb_nil(sbuf_t *s) { sb_str(s, "$-1\r\n"); }
+
+void sb_array(sbuf_t *s, size_t n) {
+    char b[64];
+    int h = snprintf(b, sizeof b, "*%lu\r\n", (unsigned long)n);
+    if (h > 0) sb_append(s, b, (size_t)h);
+}
+
+void sb_raw_err(sbuf_t *s, const char *m) {
+    sb_str(s, "-"); sb_str(s, m); sb_str(s, "\r\n");
+}
+
 int sdb_cmd_eq(const char *a, const char *b) {
     while (*a && *b) {
         char ca = *a++, cb = *b++;

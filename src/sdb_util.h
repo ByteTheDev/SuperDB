@@ -1,4 +1,4 @@
-/* sdb_util — small shared helpers: time, little-endian codecs, fsync.
+/* sdb_util — small shared helpers: time, RNG, byte buffers, codecs, fsync.
  * Portable C99, no dependencies. Part of SuperDB core (private). */
 #ifndef SDB_UTIL_H
 #define SDB_UTIL_H
@@ -9,7 +9,14 @@
 
 #define SDB_LOG_BUF (1u << 20)  /* stdio buffer for the append-only log */
 
+/* Growable byte buffer (used for snapshots, record batches, packing). */
+typedef struct { unsigned char *p; size_t n, cap; } sdb_buf_t;
+int  sdb_buf_put(sdb_buf_t *b, const void *p, size_t n);  /* 0 = ok, -1 = oom */
+void sdb_buf_free(sdb_buf_t *b);
+
 int64_t  sdb_now_ms(void);
+int64_t  sdb_now_us(void);                 /* monotonic, for timing */
+uint64_t sdb_rand64(uint64_t *state);      /* splitmix64; state is caller-owned */
 
 void     sdb_put32le(unsigned char *b, uint32_t v);
 void     sdb_put64le(unsigned char *b, uint64_t v);

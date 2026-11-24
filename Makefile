@@ -30,28 +30,33 @@ else
 endif
 
 # --- module groups (see docs/ARCHITECTURE.md) ---
-CORE_SRCS  := src/sdb_util.c src/sdb_crc.c src/sdb_store.c src/sdb_log.c src/superdb.c
+CORE_SRCS  := src/sdb_util.c src/sdb_crc.c src/sdb_thread.c src/sdb_glob.c \
+              src/sdb_coll.c src/sdb_store.c src/sdb_log.c src/superdb.c
 PROTO_SRCS := src/sdb_resp.c
 CMD_SRCS   := src/sdb_cmd.c
+NET_SRCS   := src/sdb_net.c src/sdb_repl.c
 SERVER_SRCS := src/server.c
 CLIENT_SRCS := src/sdb_client.c src/cli.c
 
 CORE_OBJS  := $(CORE_SRCS:.c=.o)
 PROTO_OBJS := $(PROTO_SRCS:.c=.o)
 CMD_OBJS   := $(CMD_SRCS:.c=.o)
+NET_OBJS   := $(NET_SRCS:.c=.o)
 
-SERVER_OBJS := $(SERVER_SRCS:.c=.o) $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS)
+SERVER_OBJS := $(SERVER_SRCS:.c=.o) $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(NET_OBJS)
 CLI_OBJS    := src/sdb_client.o src/cli.o
 
 BIN_SERVER := bin/superdb-server$(EXE)
 BIN_CLI    := bin/superdb-cli$(EXE)
 LIB_STATIC := lib/libsuperdb.a
 
-TESTS := tests/test_basic$(EXE) tests/test_batch$(EXE) tests/test_resp$(EXE)
+TESTS := tests/test_basic$(EXE) tests/test_batch$(EXE) tests/test_resp$(EXE) \
+         tests/test_types$(EXE) tests/test_txn$(EXE) tests/test_cmd$(EXE) \
+         tests/test_compact$(EXE) tests/test_repl$(EXE) tests/test_fuzz$(EXE)
 BENCH_SDB := bench/bench_sdb$(EXE)
 EXAMPLES := examples/example$(EXE) examples/batch$(EXE)
 
-ALL_OBJS := $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(SERVER_SRCS:.c=.o) $(CLIENT_SRCS:.c=.o)
+ALL_OBJS := $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(NET_OBJS) $(SERVER_SRCS:.c=.o) $(CLIENT_SRCS:.c=.o)
 
 all: $(BIN_SERVER) $(BIN_CLI)
 
@@ -80,10 +85,37 @@ tests/test_batch$(EXE): tests/test_batch.c $(CORE_OBJS)
 tests/test_resp$(EXE): tests/test_resp.c $(PROTO_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+# typed values, transactions, commands, replication, fuzzing: core + command layer
+CMD_TEST_OBJS := $(CORE_OBJS) $(PROTO_OBJS) $(CMD_OBJS) $(NET_OBJS)
+
+tests/test_types$(EXE): tests/test_types.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_txn$(EXE): tests/test_txn.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_compact$(EXE): tests/test_compact.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_repl$(EXE): tests/test_repl.c $(CORE_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_cmd$(EXE): tests/test_cmd.c $(CMD_TEST_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+tests/test_fuzz$(EXE): tests/test_fuzz.c $(CMD_TEST_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
 test check: $(BIN_SERVER) $(BIN_CLI) $(TESTS)
 	./tests/test_basic$(EXE)
 	./tests/test_batch$(EXE)
 	./tests/test_resp$(EXE)
+	./tests/test_types$(EXE)
+	./tests/test_txn$(EXE)
+	./tests/test_compact$(EXE)
+	./tests/test_repl$(EXE)
+	./tests/test_cmd$(EXE)
+	./tests/test_fuzz$(EXE)
 
 # --- benchmarks & examples ---
 $(BENCH_SDB): bench/bench_sdb.c $(CORE_OBJS)
